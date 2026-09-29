@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ app_name }}</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div id="authView" class="container py-5">
+  <div class="auth-card mx-auto">
+    <div class="brand-badge">AI</div>
+    <h1 class="h2 mt-3">AI English Tutor</h1>
+    <p class="text-secondary">Adaptive English practice with an AI tutor.</p>
+
+    <div class="mb-3">
+      <label class="form-label">Email</label>
+      <input id="email" class="form-control" type="email" placeholder="student@example.com">
+    </div>
+    <div class="mb-3">
+      <label class="form-label">Password</label>
+      <input id="password" class="form-control" type="password" minlength="6">
+    </div>
+    <div class="d-grid gap-2">
+      <button class="btn btn-primary" onclick="signIn()">Sign in</button>
+      <button class="btn btn-outline-primary" onclick="signUp()">Create account</button>
+    </div>
+    <div id="authMsg" class="small mt-3"></div>
+  </div>
+</div>
+
+<div id="appView" class="d-none">
+  <nav class="navbar navbar-expand-lg bg-white border-bottom sticky-top">
+    <div class="container-fluid px-lg-4">
+      <a class="navbar-brand fw-bold" href="#">AI English Tutor</a>
+      <div class="d-flex align-items-center gap-3">
+        <span id="navLevel" class="badge text-bg-primary">B1</span>
+        <button class="btn btn-sm btn-outline-secondary" onclick="signOut()">Sign out</button>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container-fluid p-3 p-lg-4">
+    <div class="row g-4">
+      <aside class="col-lg-3 col-xl-2">
+        <div class="menu-card">
+          <button class="menu-btn active" data-page="dashboard">🏠 Dashboard</button>
+          <button class="menu-btn" data-page="tutor">💬 AI Tutor</button>
+          <button class="menu-btn" data-page="grammar">🧠 Grammar Coach</button>
+          <button class="menu-btn" data-page="vocabulary">🔤 Vocabulary</button>
+          <button class="menu-btn" data-page="writing">✍️ Writing Coach</button>
+          <button class="menu-btn" data-page="speaking">🎙 Speaking</button>
+          <button class="menu-btn" data-page="test">📝 Mini Test</button>
+          <button class="menu-btn" data-page="progress">📊 Progress</button>
+        </div>
+      </aside>
+
+      <section class="col-lg-9 col-xl-10">
+        <div id="page-dashboard" class="page">
+          <div class="hero mb-4">
+            <div>
+              <div class="eyebrow">PERSONAL LEARNING SPACE</div>
+              <h2>Welcome back 👋</h2>
+              <p class="mb-0">Practice, get feedback, and let your student model adapt.</p>
+            </div>
+            <button class="btn btn-light" onclick="openPage('tutor')">Start practice</button>
+          </div>
+          <div class="row g-3" id="skillCards"></div>
+          <div class="card-soft mt-4">
+            <h5>AI recommendation</h5>
+            <p id="recommendation" class="mb-0">Loading your learning profile…</p>
+          </div>
+        </div>
+
+        <div id="page-tutor" class="page d-none">
+          <h2>AI Tutor</h2>
+          <p class="text-secondary">Chat naturally. The tutor uses your current learning profile.</p>
+          <div id="chatBox" class="chat-box mb-3"></div>
+          <div class="input-group">
+            <textarea id="chatInput" class="form-control" rows="2" placeholder="Write in English…"></textarea>
+            <button class="btn btn-primary" onclick="sendChat()">Send</button>
+          </div>
+        </div>
+
+        <div id="page-grammar" class="page d-none">
+          <h2>Grammar Coach</h2>
+          <p class="text-secondary">Write one or more English sentences. The coach corrects, explains and creates practice.</p>
+          <textarea id="grammarText" class="form-control" rows="6" placeholder="Yesterday I go to university and I have seen my teacher…"></textarea>
+          <button class="btn btn-primary mt-3" onclick="checkGrammar()">Analyze grammar</button>
+          <div id="grammarResult" class="result mt-4"></div>
+        </div>
+
+        <div id="page-vocabulary" class="page d-none">
+          <h2>Vocabulary Trainer</h2>
+          <div class="row g-2">
+            <div class="col-md-7"><input id="vocabTopic" class="form-control" placeholder="Topic, e.g. academic presentations"></div>
+            <div class="col-md-3">
+              <select id="vocabLevel" class="form-select">
+                <option>A2</option><option selected>B1</option><option>B2</option><option>C1</option>
+              </select>
+            </div>
+            <div class="col-md-2 d-grid"><button class="btn btn-primary" onclick="makeVocab()">Generate</button></div>
+          </div>
+          <div id="vocabResult" class="result mt-4"></div>
+        </div>
+
+        <div id="page-writing" class="page d-none">
+          <h2>Writing Coach</h2>
+          <select id="writingPurpose" class="form-select mb-2">
+            <option value="general">General English</option>
+            <option value="academic">Academic writing</option>
+            <option value="email">Professional email</option>
+            <option value="IELTS-style">IELTS-style practice</option>
+          </select>
+          <textarea id="writingText" class="form-control" rows="9" placeholder="Paste or write your text…"></textarea>
+          <button class="btn btn-primary mt-3" onclick="checkWriting()">Review writing</button>
+          <div id="writingResult" class="result mt-4"></div>
+        </div>
+
+        <div id="page-speaking" class="page d-none">
+          <h2>Speaking Practice</h2>
+          <p class="text-secondary">Use the microphone where supported, or type your spoken answer. This MVP evaluates the transcript, not acoustic pronunciation.</p>
+          <select id="scenario" class="form-select mb-2">
+            <option>general conversation</option>
+            <option>job interview</option>
+            <option>airport role-play</option>
+            <option>academic presentation Q&A</option>
+            <option>IELTS-style speaking practice</option>
+          </select>
+          <textarea id="speakingText" class="form-control" rows="6" placeholder="Your transcript appears here…"></textarea>
+          <div class="d-flex gap-2 mt-3">
+            <button id="micBtn" class="btn btn-outline-primary" onclick="startSpeech()">🎙 Start microphone</button>
+            <button class="btn btn-primary" onclick="checkSpeaking()">Get feedback</button>
+          </div>
+          <div id="speakingResult" class="result mt-4"></div>
+        </div>
+
+        <div id="page-test" class="page d-none">
+          <h2>Adaptive Mini Test</h2>
+          <div class="row g-2 mb-3">
+            <div class="col-md-4">
+              <select id="testLevel" class="form-select">
+                <option>A2</option><option selected>B1</option><option>B2</option><option>C1</option>
+              </select>
+            </div>
+            <div class="col-md-5">
+              <select id="testFocus" class="form-select">
+                <option value="mixed">Mixed</option>
+                <option value="grammar">Grammar</option>
+                <option value="vocabulary">Vocabulary</option>
+              </select>
+            </div>
+            <div class="col-md-3 d-grid"><button class="btn btn-primary" onclick="generateTest()">Generate test</button></div>
+          </div>
+          <div id="testResult"></div>
+        </div>
+
+        <div id="page-progress" class="page d-none">
+          <h2>Progress</h2>
+          <div id="progressTable" class="mt-3"></div>
+          <div class="card-soft mt-4">
+            <h5>Recent activity</h5>
+            <div id="recentActivity"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script>
+  window.APP_CONFIG = {
+    supabaseUrl: {{ supabase_url | tojson }},
+    supabaseAnonKey: {{ supabase_anon_key | tojson }}
+  };
+</script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

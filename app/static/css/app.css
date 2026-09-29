@@ -1,0 +1,50 @@
+:root {
+  --ink: #172033;
+  --muted: #6b7280;
+  --bg: #f5f7fb;
+  --primary: #5b5bd6;
+}
+body { background: var(--bg); color: var(--ink); }
+.auth-card, .menu-card, .card-soft, .page {
+  background: #fff;
+  border: 1px solid #e9ecf3;
+  border-radius: 20px;
+  box-shadow: 0 8px 30px rgba(20, 30, 70, .05);
+}
+.auth-card { max-width: 430px; padding: 34px; }
+.brand-badge {
+  width: 54px; height: 54px; display: grid; place-items: center;
+  border-radius: 16px; background: var(--primary); color: white; font-weight: 800;
+}
+.page { padding: 28px; min-height: 72vh; }
+.menu-card { padding: 10px; position: sticky; top: 82px; }
+.menu-btn {
+  width: 100%; border: 0; background: transparent; text-align: left;
+  border-radius: 12px; padding: 11px 12px; margin: 2px 0; color: #4b5563;
+}
+.menu-btn:hover, .menu-btn.active { background: #eef0ff; color: #3f3fb4; font-weight: 650; }
+.hero {
+  border-radius: 18px; padding: 26px; color: white;
+  background: linear-gradient(120deg, #5050c8, #7777e8);
+  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+}
+.eyebrow { font-size: .75rem; letter-spacing: .12em; opacity: .8; font-weight: 700; }
+.card-soft { padding: 20px; }
+.skill-score { font-size: 2rem; font-weight: 750; }
+.chat-box {
+  height: 48vh; overflow-y: auto; padding: 18px; border-radius: 16px;
+  background: #f8f9fc; border: 1px solid #eceef5;
+}
+.msg { max-width: 82%; padding: 11px 14px; border-radius: 15px; margin: 8px 0; white-space: pre-wrap; }
+.msg.user { margin-left: auto; background: #5b5bd6; color: white; }
+.msg.ai { background: white; border: 1px solid #e8eaf1; }
+.result:empty { display: none; }
+.result { padding: 18px; background: #f8f9fc; border-radius: 16px; }
+pre.feedback { white-space: pre-wrap; font-family: inherit; margin: 0; }
+.vocab-item { border-bottom: 1px solid #e7e9f0; padding: 10px 0; }
+.loader { opacity: .65; font-style: italic; }
+@media (max-width: 991px) {
+  .menu-card { position: static; display: flex; overflow-x: auto; gap: 4px; }
+  .menu-btn { min-width: max-content; }
+  .page { min-height: auto; }
+}
