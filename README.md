@@ -198,3 +198,44 @@ APP_ENV=production
 - Kazakh/Russian explanation preferences
 - Admin analytics
 - Automated weekly progress reports
+
+
+## Cost-optimized OpenAI model setup
+
+This version uses three OpenAI models, each for a separate task:
+
+- `gpt-6-luna` — text tutor, grammar, vocabulary, writing, mini-tests and transcript feedback.
+- `gpt-4o-mini-transcribe` — English speech-to-text for recorded speaking answers.
+- `gpt-4o-mini-tts` — optional AI-generated tutor audio.
+
+Environment variables:
+
+```text
+OPENAI_MODEL=gpt-6-luna
+OPENAI_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe
+OPENAI_TTS_MODEL=gpt-4o-mini-tts
+OPENAI_TTS_VOICE=marin
+```
+
+### Speaking flow
+
+```text
+Browser microphone
+    -> MediaRecorder
+    -> POST /api/audio/transcribe
+    -> gpt-4o-mini-transcribe
+    -> transcript
+    -> text tutor analysis
+```
+
+### Tutor voice flow
+
+```text
+Tutor text
+    -> POST /api/audio/tts
+    -> gpt-4o-mini-tts
+    -> MP3
+    -> browser playback
+```
+
+The UI explicitly tells learners that tutor speech is AI-generated. The application does not claim to score pronunciation from a transcript. Recordings are limited by the frontend to about two minutes per recording and by the backend to 12 MB to control cost and abuse.

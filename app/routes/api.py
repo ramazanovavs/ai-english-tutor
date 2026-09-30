@@ -1,5 +1,7 @@
 from typing import Literal
-from fastapi import APIRouter, Depends, HTTPException
+from io import BytesIO
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.services.supabase_service import require_user, admin_db
@@ -13,6 +15,7 @@ from app.agents.grammar_agent import analyze as grammar_analyze
 from app.agents.writing_agent import analyze as writing_analyze
 from app.agents.vocabulary_agent import create_set
 from app.agents.assessment_agent import generate as generate_test
+from app.services.openai_service import ask_text, transcribe_audio, synthesize_speech
 
 router = APIRouter(prefix="/api")
 
@@ -48,6 +51,11 @@ class TestSubmission(BaseModel):
 
 class SpeakingPayload(TextPayload):
     scenario: str = "general conversation"
+
+
+class TTSPayload(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    voice: str | None = None
 
 
 @router.get("/me")
@@ -149,7 +157,47 @@ Do NOT claim to evaluate pronunciation because only a transcript is available.
 Transcript:
 {payload.text}
 """
-    from app.services.openai_service import ask_text
     answer = ask_text("You are a concise CEFR-aware speaking coach.", prompt)
     record_activity(user["id"], "speaking", payload.scenario, None, {"transcript": payload.text})
     return {"feedback": answer}
+
+
+@router.post("/audio/transcribe")
+async def audio_transcribe(
+    audio: UploadFile = File(...),
+    scenario: str = Form(default="general conversation"),
+    user=Depends(require_user),
+):
+    allowed = {
+        "audio/webm", "audio/ogg", "audio/mpeg", "audio/mp4",
+        "audio/wav", "audio/x-wav", "audio/aac", "application/octet-stream"
+    }
+    content_type = audio.content_type or "application/octet-stream"
+    if content_type not in allowed:
+        raise HTTPException(status_code=400, detail="Unsupported audio format.")
+
+    content = await audio.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty audio file.")
+    if len(content) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Audio is too large. Keep recordings short.")
+
+    transcript = transcribe_audio(audio.filename or "recording.webm", content, content_type)
+    if not transcript:
+        raise HTTPException(status_code=422, detail="No speech could be transcribed.")
+
+    record_activity(
+        user["id"], "speaking", f"Transcription: {scenario}", None,
+        {"transcript": transcript, "source": "gpt-4o-mini-transcribe"},
+    )
+    return {"transcript": transcript}
+
+
+@router.post("/audio/tts")
+def audio_tts(payload: TTSPayload, user=Depends(require_user)):
+    audio_bytes = synthesize_speech(payload.text, payload.voice)
+    return StreamingResponse(
+        BytesIO(audio_bytes),
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "no-store"},
+    )

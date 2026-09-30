@@ -7,7 +7,10 @@ class Settings(BaseSettings):
     app_env: str = "development"
 
     openai_api_key: str
-    openai_model: str = "gpt-5-mini"
+    openai_model: str = "gpt-6-luna"
+    openai_transcribe_model: str = "gpt-4o-mini-transcribe"
+    openai_tts_model: str = "gpt-4o-mini-tts"
+    openai_tts_voice: str = "marin"
 
     supabase_url: str
     supabase_anon_key: str

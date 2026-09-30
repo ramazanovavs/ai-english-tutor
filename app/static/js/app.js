@@ -2,6 +2,10 @@ const sb = supabase.createClient(APP_CONFIG.supabaseUrl, APP_CONFIG.supabaseAnon
 let currentSession = null;
 let currentProfile = null;
 let currentTest = null;
+let mediaRecorder = null;
+let mediaChunks = [];
+let recordingStream = null;
+let recordingStopTimer = null;
 
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, c => ({
@@ -20,6 +24,54 @@ async function api(path, options = {}) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.detail || "Request failed");
   return data;
+}
+
+
+async function apiForm(path, formData) {
+  if (!currentSession) throw new Error("Please sign in.");
+  const res = await fetch(path, {
+    method: "POST",
+    headers: {"Authorization": `Bearer ${currentSession.access_token}`},
+    body: formData
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || "Request failed");
+  return data;
+}
+
+async function speakText(text, button = null) {
+  if (!text || !currentSession) return;
+  const oldLabel = button ? button.textContent : null;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Generating audio…";
+  }
+  try {
+    const res = await fetch("/api/audio/tts", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${currentSession.access_token}`
+      },
+      body: JSON.stringify({text})
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Could not create speech.");
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.onended = () => URL.revokeObjectURL(url);
+    await audio.play();
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = oldLabel;
+    }
+  }
 }
 
 async function signUp() {
@@ -128,7 +180,7 @@ async function sendChat() {
   try {
     const data = await api("/api/chat", {method:"POST", body:JSON.stringify({text})});
     document.getElementById("typing").remove();
-    box.innerHTML += `<div class="msg ai">${esc(data.answer)}</div>`;
+    box.innerHTML += `<div class="msg ai"><div>${esc(data.answer)}</div><button class="btn btn-sm btn-link px-0 mt-1" onclick="speakText(this.previousElementSibling.innerText, this)">🔊 Listen</button></div>`;
     box.scrollTop = box.scrollHeight;
   } catch(e) {
     document.getElementById("typing").textContent = e.message;
@@ -184,23 +236,65 @@ async function checkWriting() {
   } catch(e) { document.getElementById("writingResult").textContent = e.message; }
 }
 
-function startSpeech() {
-  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!Recognition) {
-    alert("Speech recognition is not supported in this browser. You can type the transcript instead.");
+async function startSpeech() {
+  const btn = document.getElementById("micBtn");
+
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    mediaRecorder.stop();
     return;
   }
-  const r = new Recognition();
-  r.lang = "en-US";
-  r.interimResults = false;
-  r.maxAlternatives = 1;
-  document.getElementById("micBtn").textContent = "Listening…";
-  r.onresult = ev => {
-    document.getElementById("speakingText").value = ev.results[0][0].transcript;
-  };
-  r.onerror = () => alert("Microphone transcription failed. Try again or type your answer.");
-  r.onend = () => document.getElementById("micBtn").textContent = "🎙 Start microphone";
-  r.start();
+
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    alert("Audio recording is not supported in this browser. You can type a transcript instead.");
+    return;
+  }
+
+  try {
+    recordingStream = await navigator.mediaDevices.getUserMedia({audio: true});
+    const preferred = "audio/webm;codecs=opus";
+    const options = MediaRecorder.isTypeSupported(preferred) ? {mimeType: preferred} : {};
+    mediaRecorder = new MediaRecorder(recordingStream, options);
+    mediaChunks = [];
+
+    mediaRecorder.ondataavailable = event => {
+      if (event.data && event.data.size > 0) mediaChunks.push(event.data);
+    };
+
+    mediaRecorder.onstop = async () => {
+      clearTimeout(recordingStopTimer);
+      btn.disabled = true;
+      btn.textContent = "Transcribing…";
+      if (recordingStream) recordingStream.getTracks().forEach(track => track.stop());
+
+      try {
+        const mimeType = mediaRecorder.mimeType || "audio/webm";
+        const blob = new Blob(mediaChunks, {type: mimeType});
+        const ext = mimeType.includes("ogg") ? "ogg" : mimeType.includes("mp4") ? "m4a" : "webm";
+        const form = new FormData();
+        form.append("audio", blob, `recording.${ext}`);
+        form.append("scenario", document.getElementById("scenario").value);
+        const data = await apiForm("/api/audio/transcribe", form);
+        document.getElementById("speakingText").value = data.transcript;
+      } catch (e) {
+        alert(e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "🎙 Record answer";
+        mediaRecorder = null;
+        recordingStream = null;
+        mediaChunks = [];
+      }
+    };
+
+    mediaRecorder.start();
+    btn.textContent = "⏹ Stop recording";
+    recordingStopTimer = setTimeout(() => {
+      if (mediaRecorder && mediaRecorder.state === "recording") mediaRecorder.stop();
+    }, 120000);
+  } catch (e) {
+    alert("Microphone access failed. Allow microphone permission or type the transcript.");
+    btn.textContent = "🎙 Record answer";
+  }
 }
 
 async function checkSpeaking() {
@@ -210,7 +304,7 @@ async function checkSpeaking() {
   loading("speakingResult", "Preparing speaking feedback…");
   try {
     const d = await api("/api/speaking", {method:"POST", body:JSON.stringify({text, scenario})});
-    document.getElementById("speakingResult").innerHTML = `<pre class="feedback">${esc(d.feedback)}</pre>`;
+    document.getElementById("speakingResult").innerHTML = `<pre class="feedback">${esc(d.feedback)}</pre><button class="btn btn-sm btn-outline-primary mt-2" onclick="speakText(this.previousElementSibling.innerText, this)">🔊 Listen to feedback</button>`;
   } catch(e) { document.getElementById("speakingResult").textContent = e.message; }
 }
 

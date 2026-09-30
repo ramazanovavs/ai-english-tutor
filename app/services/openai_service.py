@@ -37,3 +37,28 @@ def ask_json(instructions: str, user_input: str) -> dict[str, Any]:
         if start >= 0 and end > start:
             return json.loads(text[start:end + 1])
         raise ValueError("Model returned invalid JSON")
+
+
+def transcribe_audio(filename: str, content: bytes, content_type: str | None = None) -> str:
+    """Transcribe uploaded learner audio with the low-cost speech-to-text model."""
+    file_arg = (filename or "recording.webm", content, content_type or "application/octet-stream")
+    result = client.audio.transcriptions.create(
+        model=settings.openai_transcribe_model,
+        file=file_arg,
+        language="en",
+    )
+    return (result.text or "").strip()
+
+
+def synthesize_speech(text: str, voice: str | None = None) -> bytes:
+    """Create MP3 speech for short tutor feedback."""
+    response = client.audio.speech.create(
+        model=settings.openai_tts_model,
+        voice=voice or settings.openai_tts_voice,
+        input=text[:4000],
+        instructions="Speak clearly and naturally as a supportive English teacher. Use moderate speed.",
+        response_format="mp3",
+    )
+    if hasattr(response, "read"):
+        return response.read()
+    return response.content
