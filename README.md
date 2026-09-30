@@ -239,3 +239,126 @@ Tutor text
 ```
 
 The UI explicitly tells learners that tutor speech is AI-generated. The application does not claim to score pronunciation from a transcript. Recordings are limited by the frontend to about two minutes per recording and by the backend to 12 MB to control cost and abuse.
+
+## IELTS preparation extension
+
+This version adds a second learning track alongside General English / CEFR:
+
+- IELTS profile: Academic or General Training, target band, planned exam date
+- IELTS dashboard with section band history and a next-section recommendation
+- Writing Task 1 and Task 2 prompt generation and criterion-level formative feedback
+- Speaking Parts 1-3 question generation, microphone transcription, and transcript-based feedback
+- Reading practice sets with automatic checking
+- Listening practice sets rendered with the existing OpenAI TTS pipeline
+- IELTS band history and mock-test data model
+
+### Important scoring note
+
+All IELTS bands shown by this application are **AI-generated formative practice estimates**. They are not official IELTS results. Speaking pronunciation is deliberately left unscored because the current implementation evaluates the transcript, not acoustic pronunciation features. Short Reading/Listening sets also use an approximate practice-band conversion rather than an official 40-question test conversion.
+
+### Supabase: existing project
+
+If you have **already run the previous full `database/schema.sql`**, do not rebuild the database. Run only:
+
+```text
+database/ielts_schema.sql
+```
+
+in **Supabase -> SQL Editor -> New query -> Run**.
+
+It adds six IELTS tables without deleting existing General English data:
+
+```text
+ielts_profiles
+ielts_writing_attempts
+ielts_speaking_attempts
+ielts_objective_attempts
+ielts_band_history
+ielts_mock_tests
+```
+
+### Supabase: new project
+
+For a completely new Supabase project, run the current:
+
+```text
+database/schema.sql
+```
+
+It contains both the General English schema and the IELTS extension, so you do not need to run `ielts_schema.sql` again.
+
+### IELTS API routes
+
+```text
+GET  /api/ielts/dashboard
+POST /api/ielts/profile
+POST /api/ielts/writing/generate
+POST /api/ielts/writing/assess
+POST /api/ielts/speaking/generate
+POST /api/ielts/speaking/assess
+POST /api/ielts/reading/generate
+POST /api/ielts/listening/generate
+POST /api/ielts/objective/submit
+```
+
+The same cost-optimized OpenAI stack is used:
+
+```text
+Text tutoring / IELTS generation and feedback -> OPENAI_MODEL
+Speech-to-text -> gpt-4o-mini-transcribe
+Text-to-speech -> gpt-4o-mini-tts
+```
+
+
+## Full IELTS Mock Exam
+
+The project now includes a complete **Full IELTS Mock Exam** mode.
+
+Flow:
+
+```text
+Listening (4 parts / 40 questions / ~30 min)
+→ Reading (3 sections / 40 questions / 60 min)
+→ Writing (Task 1 + Task 2 / 60 min)
+→ Speaking (Parts 1–3 / 11–14 min)
+→ Practice result
+```
+
+### Exam-mode safeguards
+
+- Listening answer keys and scripts stay server-side.
+- Listening audio is generated from the stored script through TTS.
+- The normal mock UI allows each Listening part to be started once.
+- Reading answer keys stay server-side until submission.
+- Writing Task 2 is weighted twice Task 1 when calculating the practice Writing band.
+- Speaking is assessed from transcripts; pronunciation is deliberately left unscored.
+- All scores are clearly marked as formative **practice estimates**, not official IELTS results.
+
+### Existing Supabase project
+
+If you already ran the previous IELTS schema, run only:
+
+```text
+database/ielts_full_mock_schema.sql
+```
+
+It adds `ielts_mock_sections` and does not delete existing learning data.
+
+For a brand-new Supabase project, run the complete:
+
+```text
+database/schema.sql
+```
+
+### Full mock API endpoints
+
+```text
+POST /api/ielts/mock/start
+GET  /api/ielts/mock/{mock_id}
+POST /api/ielts/mock/{mock_id}/generate
+GET  /api/ielts/mock/{mock_id}/listening/{part}/audio
+POST /api/ielts/mock/{mock_id}/objective/submit
+POST /api/ielts/mock/{mock_id}/writing/submit
+POST /api/ielts/mock/{mock_id}/speaking/submit
+POST /api/ielts/mock/{mock_id}/finish
+```

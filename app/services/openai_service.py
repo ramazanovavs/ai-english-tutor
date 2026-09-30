@@ -50,13 +50,13 @@ def transcribe_audio(filename: str, content: bytes, content_type: str | None = N
     return (result.text or "").strip()
 
 
-def synthesize_speech(text: str, voice: str | None = None) -> bytes:
-    """Create MP3 speech for short tutor feedback."""
+def synthesize_speech(text: str, voice: str | None = None, instructions: str | None = None) -> bytes:
+    """Create MP3 speech for tutor feedback or listening practice."""
     response = client.audio.speech.create(
         model=settings.openai_tts_model,
         voice=voice or settings.openai_tts_voice,
         input=text[:4000],
-        instructions="Speak clearly and naturally as a supportive English teacher. Use moderate speed.",
+        instructions=instructions or "Speak clearly and naturally as a supportive English teacher. Use moderate speed.",
         response_format="mp3",
     )
     if hasattr(response, "read"):

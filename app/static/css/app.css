@@ -48,3 +48,71 @@ pre.feedback { white-space: pre-wrap; font-family: inherit; margin: 0; }
   .menu-btn { min-width: max-content; }
   .page { min-height: auto; }
 }
+
+.reading-passage { line-height: 1.75; max-height: 52vh; overflow-y: auto; white-space: normal; }
+#ieltsBandCards .card-soft { padding: 16px; }
+
+
+/* Full IELTS mock exam */
+.mock-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 18px;
+  padding: 16px 18px;
+  border: 1px solid #e7e9f2;
+  border-radius: 16px;
+  background: #fafbff;
+}
+.mock-timer-wrap { text-align: right; }
+.mock-timer {
+  font-size: 1.7rem;
+  line-height: 1;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.mock-timer.time-low { color: #b42318; }
+.mock-progress {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+.mock-step {
+  padding: 9px 10px;
+  border-radius: 12px;
+  text-align: center;
+  background: #f1f3f8;
+  color: #6b7280;
+  font-size: .9rem;
+  font-weight: 650;
+}
+.mock-step.active { background: #5b5bd6; color: white; }
+.mock-step.done { background: #e7f7ee; color: #176b3a; }
+.mock-question {
+  padding: 16px;
+  border: 1px solid #e8eaf2;
+  border-radius: 14px;
+  margin: 12px 0;
+  background: #fff;
+}
+.mock-passage {
+  max-height: 52vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  line-height: 1.65;
+}
+.mock-audio-box {
+  border: 1px dashed #b9bee9;
+  border-radius: 14px;
+  padding: 16px;
+  background: #f8f8ff;
+}
+.mock-band {
+  font-size: 2.4rem;
+  font-weight: 800;
+}
+@media (max-width: 768px) {
+  .mock-progress { grid-template-columns: 1fr; }
+  .mock-step { text-align: left; }
+  .mock-toolbar { align-items: flex-start; }
+}
