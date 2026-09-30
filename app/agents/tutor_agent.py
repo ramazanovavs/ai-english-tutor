@@ -1,5 +1,5 @@
 import json
-from app.services.openai_service import ask_text
+from app.services.openai_service import ask_text, stream_text
 from app.services.student_model import get_student_context
 
 
@@ -20,9 +20,9 @@ Student context is supplied with each request.
 """
 
 
-def chat(user_id: str, message: str) -> str:
+def build_prompt(user_id: str, message: str) -> str:
     context = get_student_context(user_id)
-    prompt = f"""
+    return f"""
 STUDENT MODEL:
 {json.dumps(context, ensure_ascii=False, default=str)}
 
@@ -31,4 +31,11 @@ LEARNER MESSAGE:
 
 Respond as the tutor. Keep the response focused and interactive.
 """
-    return ask_text(INSTRUCTIONS, prompt)
+
+
+def chat(user_id: str, message: str) -> str:
+    return ask_text(INSTRUCTIONS, build_prompt(user_id, message))
+
+
+def chat_stream(user_id: str, message: str):
+    yield from stream_text(INSTRUCTIONS, build_prompt(user_id, message))

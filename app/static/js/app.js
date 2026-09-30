@@ -170,20 +170,142 @@ function loading(elId, text="Working…") {
 
 async function sendChat() {
   const input = document.getElementById("chatInput");
-  const text = input.value.trim();
-  if (!text) return;
+  const sendBtn = document.getElementById("chatSendBtn");
   const box = document.getElementById("chatBox");
-  box.innerHTML += `<div class="msg user">${esc(text)}</div>`;
+  const text = input.value.trim();
+
+  if (!text || sendBtn.disabled) return;
+
+  // Remove stale loading bubbles left by any earlier failed request.
+  box.querySelectorAll(".chat-thinking, .msg.ai.loader").forEach(el => {
+    if ((el.textContent || "").includes("Tutor is thinking")) el.remove();
+  });
+
+  box.insertAdjacentHTML("beforeend", `<div class="msg user">${esc(text)}</div>`);
   input.value = "";
-  box.innerHTML += `<div id="typing" class="msg ai loader">Tutor is thinking…</div>`;
+
+  const requestId = `chat_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const thinkingId = `${requestId}_thinking`;
+  const answerId = `${requestId}_answer`;
+
+  box.insertAdjacentHTML(
+    "beforeend",
+    `<div id="${thinkingId}" class="msg ai loader chat-thinking">Tutor is thinking…</div>`
+  );
   box.scrollTop = box.scrollHeight;
+
+  sendBtn.disabled = true;
+  sendBtn.textContent = "Sending…";
+  input.disabled = true;
+
+  let answerStarted = false;
+  let answerText = "";
+
   try {
-    const data = await api("/api/chat", {method:"POST", body:JSON.stringify({text})});
-    document.getElementById("typing").remove();
-    box.innerHTML += `<div class="msg ai"><div>${esc(data.answer)}</div><button class="btn btn-sm btn-link px-0 mt-1" onclick="speakText(this.previousElementSibling.innerText, this)">🔊 Listen</button></div>`;
+    const res = await fetch("/api/chat/stream", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${currentSession.access_token}`
+      },
+      body: JSON.stringify({text})
+    });
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || `Request failed (${res.status})`);
+    }
+
+    if (!res.body) throw new Error("Streaming is not supported by this browser.");
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+
+    while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, {stream:true});
+      const events = buffer.split("\n\n");
+      buffer = events.pop() || "";
+
+      for (const rawEvent of events) {
+        const dataLine = rawEvent
+          .split("\n")
+          .find(line => line.startsWith("data: "));
+        if (!dataLine) continue;
+
+        const event = JSON.parse(dataLine.slice(6));
+
+        if (event.type === "delta") {
+          if (!answerStarted) {
+            document.getElementById(thinkingId)?.remove();
+            box.insertAdjacentHTML(
+              "beforeend",
+              `<div id="${answerId}" class="msg ai"><div class="streamed-answer"></div></div>`
+            );
+            answerStarted = true;
+          }
+
+          answerText += event.text || "";
+          const answerEl = document.querySelector(`#${answerId} .streamed-answer`);
+          if (answerEl) answerEl.textContent = answerText;
+          box.scrollTop = box.scrollHeight;
+        }
+
+        if (event.type === "error") {
+          throw new Error(event.message || "Tutor request failed.");
+        }
+
+        if (event.type === "done") {
+          document.getElementById(thinkingId)?.remove();
+
+          if (answerStarted) {
+            const wrapper = document.getElementById(answerId);
+            if (wrapper && !wrapper.querySelector(".listen-btn")) {
+              const button = document.createElement("button");
+              button.className = "btn btn-sm btn-link px-0 mt-1 listen-btn";
+              button.textContent = "🔊 Listen";
+              button.onclick = () => {
+                const content = wrapper.querySelector(".streamed-answer")?.innerText || "";
+                speakText(content, button);
+              };
+              wrapper.appendChild(button);
+            }
+          }
+        }
+      }
+    }
+
+    // Defensive cleanup if the connection closed without a final event.
+    document.getElementById(thinkingId)?.remove();
+
+  } catch (e) {
+    document.getElementById(thinkingId)?.remove();
+
+    if (!answerStarted) {
+      box.insertAdjacentHTML(
+        "beforeend",
+        `<div class="msg ai text-danger">${esc(e.message || "Request failed")}</div>`
+      );
+    } else {
+      const wrapper = document.getElementById(answerId);
+      if (wrapper) {
+        const note = document.createElement("div");
+        note.className = "small text-danger mt-1";
+        note.textContent = "The response was interrupted.";
+        wrapper.appendChild(note);
+      }
+    }
     box.scrollTop = box.scrollHeight;
-  } catch(e) {
-    document.getElementById("typing").textContent = e.message;
+  } finally {
+    // Remove any loading indicator belonging to this request, on both success and error.
+    document.getElementById(thinkingId)?.remove();
+    sendBtn.disabled = false;
+    sendBtn.textContent = "Send";
+    input.disabled = false;
+    input.focus();
   }
 }
 

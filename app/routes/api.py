@@ -1,3 +1,5 @@
+import json
+
 from typing import Literal
 from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -10,7 +12,7 @@ from app.services.student_model import (
     get_student_context,
     record_activity,
 )
-from app.agents.tutor_agent import chat as tutor_chat
+from app.agents.tutor_agent import chat as tutor_chat, chat_stream as tutor_chat_stream
 from app.agents.grammar_agent import analyze as grammar_analyze
 from app.agents.writing_agent import analyze as writing_analyze
 from app.agents.vocabulary_agent import create_set
@@ -99,6 +101,7 @@ def me(user=Depends(require_user)):
 
 @router.post("/chat")
 def chat(payload: ChatPayload, user=Depends(require_user)):
+    """Non-streaming fallback endpoint."""
     ensure_profile(user["id"], user.get("email"))
     answer = tutor_chat(user["id"], payload.text)
 
@@ -108,6 +111,62 @@ def chat(payload: ChatPayload, user=Depends(require_user)):
         {"user_id": user["id"], "role": "assistant", "content": answer},
     ]).execute()
     return {"answer": answer}
+
+
+@router.post("/chat/stream")
+def chat_stream(payload: ChatPayload, user=Depends(require_user)):
+    """Stream tutor text to the browser using Server-Sent Events."""
+    ensure_profile(user["id"], user.get("email"))
+    user_id = user["id"]
+    user_text = payload.text
+
+    # Save the learner message before generation starts.
+    admin_db().table("messages").insert({
+        "user_id": user_id,
+        "role": "user",
+        "content": user_text,
+    }).execute()
+
+    def event_stream():
+        chunks: list[str] = []
+        try:
+            for delta in tutor_chat_stream(user_id, user_text):
+                chunks.append(delta)
+                payload_json = json.dumps(
+                    {"type": "delta", "text": delta},
+                    ensure_ascii=False,
+                )
+                yield f"data: {payload_json}\n\n"
+
+            answer = "".join(chunks).strip()
+            if answer:
+                admin_db().table("messages").insert({
+                    "user_id": user_id,
+                    "role": "assistant",
+                    "content": answer,
+                }).execute()
+
+            yield 'data: {"type":"done"}\n\n'
+        except Exception as exc:
+            # Keep internal details in Render logs, but send a safe message to the UI.
+            print(f"Chat stream error: {type(exc).__name__}: {exc}", flush=True)
+            error_json = json.dumps(
+                {
+                    "type": "error",
+                    "message": "The tutor could not complete the response. Please try again.",
+                },
+                ensure_ascii=False,
+            )
+            yield f"data: {error_json}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/grammar")

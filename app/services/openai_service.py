@@ -18,6 +18,25 @@ def ask_text(instructions: str, user_input: str) -> str:
     return response.output_text.strip()
 
 
+def stream_text(instructions: str, user_input: str):
+    """Yield text deltas from the Responses API as soon as they arrive."""
+    stream = client.responses.create(
+        model=settings.openai_model,
+        instructions=instructions,
+        input=user_input,
+        stream=True,
+    )
+    for event in stream:
+        event_type = getattr(event, "type", "")
+        if event_type == "response.output_text.delta":
+            delta = getattr(event, "delta", "")
+            if delta:
+                yield delta
+        elif event_type == "error":
+            message = getattr(event, "message", None) or "OpenAI streaming error"
+            raise RuntimeError(message)
+
+
 def ask_json(instructions: str, user_input: str) -> dict[str, Any]:
     prompt = (
         user_input
