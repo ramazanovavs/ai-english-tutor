@@ -490,9 +490,16 @@ async def audio_transcribe(
         "audio/webm", "audio/ogg", "audio/mpeg", "audio/mp4",
         "audio/wav", "audio/x-wav", "audio/aac", "application/octet-stream"
     }
-    content_type = audio.content_type or "application/octet-stream"
+    raw_content_type = audio.content_type or "application/octet-stream"
+    # Browsers often send values such as "audio/webm;codecs=opus".
+    # The actual container type is the part before the semicolon.
+    content_type = raw_content_type.split(";", 1)[0].strip().lower()
+
     if content_type not in allowed:
-        raise HTTPException(status_code=400, detail="Unsupported audio format.")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported audio format: {raw_content_type}",
+        )
 
     content = await audio.read()
     if not content:
