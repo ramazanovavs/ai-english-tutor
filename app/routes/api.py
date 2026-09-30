@@ -1,6 +1,7 @@
 import json
 
 from typing import Literal
+from datetime import datetime, timezone
 from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
@@ -15,7 +16,7 @@ from app.services.student_model import (
 from app.agents.tutor_agent import chat as tutor_chat, chat_stream as tutor_chat_stream
 from app.agents.grammar_agent import analyze as grammar_analyze
 from app.agents.writing_agent import analyze as writing_analyze
-from app.agents.vocabulary_agent import create_set
+from app.agents.vocabulary_agent import create_set, create_practice
 from app.agents.assessment_agent import generate as generate_test
 from app.services.openai_service import ask_text, transcribe_audio, synthesize_speech
 from app.agents.ielts_agent import (
@@ -70,6 +71,17 @@ class WritingPayload(TextPayload):
 class VocabularyPayload(BaseModel):
     topic: str = Field(min_length=1, max_length=100)
     level: str = "B1"
+
+
+class VocabularyPracticePayload(BaseModel):
+    topic: str = Field(min_length=1, max_length=100)
+    level: str = "B1"
+    items: list[dict]
+
+
+class VocabularyPracticeSubmission(BaseModel):
+    test_id: str
+    answers: dict[str, str]
 
 
 class TestPayload(BaseModel):
@@ -193,9 +205,223 @@ def writing(payload: WritingPayload, user=Depends(require_user)):
 
 @router.post("/vocabulary")
 def vocabulary(payload: VocabularyPayload, user=Depends(require_user)):
+    ensure_profile(user["id"], user.get("email"))
     result = create_set(payload.topic, payload.level)
-    record_activity(user["id"], "vocabulary", payload.topic, None, {"level": payload.level})
+
+    record_activity(
+        user["id"],
+        "vocabulary",
+        payload.topic,
+        None,
+        {"level": payload.level, "activity": "generated_set"},
+    )
+
+    db = admin_db()
+    for item in result.get("items") or []:
+        word = (item.get("word") or "").strip()
+        if not word:
+            continue
+        db.table("vocabulary_words").upsert(
+            {
+                "user_id": user["id"],
+                "word": word,
+                "part_of_speech": item.get("part_of_speech"),
+                "definition": item.get("definition"),
+                "example_sentence": item.get("example"),
+                "collocation": item.get("collocation"),
+                "topic": payload.topic,
+                "cefr_level": payload.level,
+                "status": "new",
+            },
+            on_conflict="user_id,word",
+        ).execute()
+
     return result
+
+
+@router.post("/vocabulary/practice")
+def vocabulary_practice(payload: VocabularyPracticePayload, user=Depends(require_user)):
+    ensure_profile(user["id"], user.get("email"))
+    if len(payload.items) < 4:
+        raise HTTPException(status_code=400, detail="Generate a vocabulary set first.")
+
+    result = create_practice(payload.topic, payload.level, payload.items)
+    questions = result.get("questions") or []
+    if len(questions) != 10:
+        raise HTTPException(status_code=502, detail="The AI did not generate a complete 10-question practice set.")
+
+    db = admin_db()
+    test_row = db.table("tests").insert(
+        {
+            "user_id": user["id"],
+            "title": result.get("title") or f"{payload.topic} vocabulary practice",
+            "test_type": "vocabulary_practice",
+            "focus": "vocabulary",
+            "level": payload.level,
+            "questions": questions,
+        }
+    ).execute()
+    test_id = test_row.data[0]["id"]
+
+    public_questions = [
+        {
+            "id": q.get("id"),
+            "type": q.get("type"),
+            "question": q.get("question"),
+            "options": q.get("options") or [],
+        }
+        for q in questions
+    ]
+
+    return {
+        "test_id": test_id,
+        "title": result.get("title") or f"{payload.topic} vocabulary practice",
+        "topic": payload.topic,
+        "level": payload.level,
+        "questions": public_questions,
+    }
+
+
+def _vocab_normalize(value: str | None) -> str:
+    return " ".join((value or "").strip().lower().split())
+
+
+@router.post("/vocabulary/practice/submit")
+def vocabulary_practice_submit(payload: VocabularyPracticeSubmission, user=Depends(require_user)):
+    db = admin_db()
+
+    test_row = (
+        db.table("tests")
+        .select("*")
+        .eq("id", payload.test_id)
+        .eq("user_id", user["id"])
+        .eq("focus", "vocabulary")
+        .limit(1)
+        .execute()
+    )
+    if not test_row.data:
+        raise HTTPException(status_code=404, detail="Vocabulary practice not found.")
+
+    test = test_row.data[0]
+    questions = test.get("questions") or []
+    correct = 0
+    details = []
+    word_stats: dict[str, dict[str, int]] = {}
+
+    for q in questions:
+        qid = str(q.get("id"))
+        given = payload.answers.get(qid, "")
+        expected = str(q.get("answer") or "")
+        ok = _vocab_normalize(given) == _vocab_normalize(expected)
+        correct += int(ok)
+
+        word = str(q.get("word") or "").strip()
+        if word:
+            stats = word_stats.setdefault(word, {"correct": 0, "wrong": 0})
+            stats["correct" if ok else "wrong"] += 1
+
+        details.append(
+            {
+                "id": q.get("id"),
+                "type": q.get("type"),
+                "question": q.get("question"),
+                "answer": given,
+                "correct_answer": expected,
+                "correct": ok,
+                "explanation": q.get("explanation") or "",
+                "word": word,
+            }
+        )
+
+    total = len(questions)
+    score = round(correct / max(total, 1) * 100)
+
+    attempt_row = db.table("test_attempts").insert(
+        {
+            "user_id": user["id"],
+            "test_id": payload.test_id,
+            "title": test.get("title"),
+            "level": test.get("level"),
+            "focus": "vocabulary",
+            "score": score,
+            "correct_count": correct,
+            "total_count": total,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "metadata": {"practice_type": "vocabulary"},
+        }
+    ).execute()
+    attempt_id = attempt_row.data[0]["id"]
+
+    answer_rows = [
+        {
+            "attempt_id": attempt_id,
+            "question_number": int(d["id"]),
+            "skill": d.get("word") or "vocabulary",
+            "question": d.get("question") or "",
+            "selected_answer": d.get("answer"),
+            "correct_answer": d.get("correct_answer"),
+            "is_correct": d.get("correct"),
+            "explanation": d.get("explanation"),
+        }
+        for d in details
+    ]
+    if answer_rows:
+        db.table("test_answers").insert(answer_rows).execute()
+
+    for word, stats in word_stats.items():
+        row = (
+            db.table("vocabulary_words")
+            .select("*")
+            .eq("user_id", user["id"])
+            .eq("word", word)
+            .limit(1)
+            .execute()
+        )
+        if not row.data:
+            continue
+
+        item = row.data[0]
+        new_correct = int(item.get("correct_count") or 0) + stats["correct"]
+        new_wrong = int(item.get("wrong_count") or 0) + stats["wrong"]
+        total_reviews = new_correct + new_wrong
+        accuracy = new_correct / max(total_reviews, 1)
+
+        if new_correct >= 3 and accuracy >= 0.75:
+            status = "mastered"
+        elif new_correct >= 1:
+            status = "review"
+        else:
+            status = "learning"
+
+        db.table("vocabulary_words").update(
+            {
+                "correct_count": new_correct,
+                "wrong_count": new_wrong,
+                "repetitions": int(item.get("repetitions") or 0) + 1,
+                "status": status,
+                "last_reviewed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("id", item["id"]).execute()
+
+    record_activity(
+        user["id"],
+        "vocabulary",
+        test.get("title") or "Vocabulary practice",
+        score,
+        {
+            "level": test.get("level"),
+            "correct": correct,
+            "total": total,
+            "attempt_id": attempt_id,
+        },
+    )
+
+    return {
+        "score": score,
+        "correct": correct,
+        "total": total,
+        "details": details,
+    }
 
 
 @router.post("/test/generate")

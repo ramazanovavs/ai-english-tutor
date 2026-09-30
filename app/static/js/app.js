@@ -2,6 +2,8 @@ const sb = supabase.createClient(APP_CONFIG.supabaseUrl, APP_CONFIG.supabaseAnon
 let currentSession = null;
 let currentProfile = null;
 let currentTest = null;
+let currentVocabSet = null;
+let currentVocabPractice = null;
 let mediaRecorder = null;
 let mediaChunks = [];
 let recordingStream = null;
@@ -363,14 +365,195 @@ async function makeVocab() {
   const topic = document.getElementById("vocabTopic").value.trim();
   const level = document.getElementById("vocabLevel").value;
   if (!topic) return;
+
+  currentVocabPractice = null;
   loading("vocabResult", "Building vocabulary set…");
+
   try {
-    const d = await api("/api/vocabulary", {method:"POST", body:JSON.stringify({topic, level})});
+    const d = await api("/api/vocabulary", {
+      method:"POST",
+      body:JSON.stringify({topic, level})
+    });
+
+    currentVocabSet = {topic, level, items: d.items || []};
+
     document.getElementById("vocabResult").innerHTML = `
       <h4>${esc(d.topic)}</h4>
-      ${(d.items || []).map(x => `<div class="vocab-item"><strong>${esc(x.word)}</strong> <span class="text-secondary">${esc(x.part_of_speech)}</span><br>${esc(x.definition)}<br><em>${esc(x.example)}</em><br><small>Collocation: ${esc(x.collocation)}</small></div>`).join("")}
-      <div class="alert alert-light mt-3">${esc(d.tip)}</div>`;
-  } catch(e) { document.getElementById("vocabResult").textContent = e.message; }
+      ${(d.items || []).map(x => `
+        <div class="vocab-item">
+          <strong>${esc(x.word)}</strong>
+          <span class="text-secondary">${esc(x.part_of_speech)}</span><br>
+          ${esc(x.definition)}<br>
+          <em>${esc(x.example)}</em><br>
+          <small>Collocation: ${esc(x.collocation)}</small>
+        </div>`).join("")}
+      <div class="alert alert-light mt-3">${esc(d.tip)}</div>
+      <div class="d-flex align-items-center gap-2 mt-3 flex-wrap">
+        <button id="vocabPracticeBtn" class="btn btn-primary" onclick="startVocabPractice()">
+          Start practice · 10 questions
+        </button>
+        <span class="small text-secondary">
+          Your Dashboard score changes only after you complete the practice.
+        </span>
+      </div>
+      <div id="vocabPracticeArea" class="mt-4"></div>`;
+  } catch(e) {
+    document.getElementById("vocabResult").textContent = e.message;
+  }
+}
+
+
+async function startVocabPractice() {
+  if (!currentVocabSet?.items?.length) {
+    alert("Generate a vocabulary set first.");
+    return;
+  }
+
+  const btn = document.getElementById("vocabPracticeBtn");
+  const area = document.getElementById("vocabPracticeArea");
+  btn.disabled = true;
+  btn.textContent = "Preparing practice…";
+  area.innerHTML = `<div class="loader">Creating 10 vocabulary questions…</div>`;
+
+  try {
+    const d = await api("/api/vocabulary/practice", {
+      method:"POST",
+      body:JSON.stringify(currentVocabSet)
+    });
+    currentVocabPractice = d;
+    renderVocabPractice();
+  } catch(e) {
+    area.innerHTML = `<div class="alert alert-danger">${esc(e.message)}</div>`;
+    btn.disabled = false;
+    btn.textContent = "Start practice · 10 questions";
+  }
+}
+
+
+function renderVocabPractice() {
+  const area = document.getElementById("vocabPracticeArea");
+  if (!currentVocabPractice) return;
+
+  area.innerHTML = `
+    <hr class="my-4">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <div>
+        <h4 class="mb-1">${esc(currentVocabPractice.title)}</h4>
+        <div class="text-secondary small">Meaning → Context → Recall</div>
+      </div>
+      <span class="badge text-bg-light">10 questions</span>
+    </div>
+
+    <form id="vocabPracticeForm">
+      ${(currentVocabPractice.questions || []).map((q, idx) => {
+        const name = `vocab_q_${q.id}`;
+        const typeLabel =
+          q.type === "meaning" ? "Meaning" :
+          q.type === "context" ? "Context" : "Recall";
+
+        const control = (q.options || []).length
+          ? (q.options || []).map((option, i) => `
+              <div class="form-check mt-2">
+                <input class="form-check-input" type="radio"
+                  name="${name}" id="${name}_${i}" value="${esc(option)}">
+                <label class="form-check-label" for="${name}_${i}">
+                  ${esc(option)}
+                </label>
+              </div>`).join("")
+          : `<input class="form-control mt-2" name="${name}"
+               autocomplete="off" placeholder="Type the word or phrase">`;
+
+        return `
+          <div class="card-soft my-3 vocab-practice-question">
+            <div class="small text-secondary">${idx + 1}/10 · ${typeLabel}</div>
+            <div class="fw-semibold mt-1">${esc(q.question)}</div>
+            ${control}
+            <div id="vocab_feedback_${q.id}" class="mt-2"></div>
+          </div>`;
+      }).join("")}
+
+      <button id="vocabSubmitBtn" type="button"
+        class="btn btn-primary" onclick="submitVocabPractice()">
+        Check answers
+      </button>
+    </form>
+
+    <div id="vocabPracticeResult" class="mt-4"></div>`;
+}
+
+
+function collectVocabPracticeAnswers() {
+  const answers = {};
+  for (const q of (currentVocabPractice?.questions || [])) {
+    const name = `vocab_q_${q.id}`;
+    const radio = document.querySelector(`input[name="${name}"]:checked`);
+    const textInput = document.querySelector(
+      `input[name="${name}"]:not([type="radio"])`
+    );
+    answers[String(q.id)] = radio
+      ? radio.value
+      : (textInput ? textInput.value.trim() : "");
+  }
+  return answers;
+}
+
+
+async function submitVocabPractice() {
+  if (!currentVocabPractice) return;
+
+  const answers = collectVocabPracticeAnswers();
+  const unanswered = Object.values(answers).filter(v => !String(v).trim()).length;
+  if (unanswered > 0) {
+    alert(`Please answer all 10 questions. ${unanswered} question(s) are still empty.`);
+    return;
+  }
+
+  const btn = document.getElementById("vocabSubmitBtn");
+  btn.disabled = true;
+  btn.textContent = "Checking…";
+
+  try {
+    const d = await api("/api/vocabulary/practice/submit", {
+      method:"POST",
+      body:JSON.stringify({
+        test_id: currentVocabPractice.test_id,
+        answers
+      })
+    });
+
+    for (const item of (d.details || [])) {
+      const el = document.getElementById(`vocab_feedback_${item.id}`);
+      if (!el) continue;
+
+      el.innerHTML = item.correct
+        ? `<div class="small text-success"><strong>Correct.</strong> ${esc(item.explanation || "")}</div>`
+        : `<div class="small text-danger">
+             <strong>Review:</strong> your answer: ${esc(item.answer || "—")}<br>
+             Correct answer: <strong>${esc(item.correct_answer)}</strong><br>
+             <span class="text-secondary">${esc(item.explanation || "")}</span>
+           </div>`;
+    }
+
+    document.querySelectorAll("#vocabPracticeForm input")
+      .forEach(el => el.disabled = true);
+
+    document.getElementById("vocabPracticeResult").innerHTML = `
+      <div class="alert ${d.score >= 70 ? "alert-success" : "alert-primary"}">
+        <h4 class="mb-1">Vocabulary score: ${esc(d.score)}%</h4>
+        <div>${esc(d.correct)} / ${esc(d.total)} correct</div>
+      </div>
+      <p class="small text-secondary">
+        This completed practice has now been added to your Vocabulary progress.
+      </p>`;
+
+    btn.textContent = "Completed";
+    await loadProfile();
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = "Check answers";
+    document.getElementById("vocabPracticeResult").innerHTML =
+      `<div class="alert alert-danger">${esc(e.message)}</div>`;
+  }
 }
 
 async function checkWriting() {
