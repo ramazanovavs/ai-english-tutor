@@ -172,7 +172,7 @@ def chat_stream(payload: ChatPayload, user=Depends(require_user)):
 @router.post("/grammar")
 def grammar(payload: TextPayload, user=Depends(require_user)):
     context = get_student_context(user["id"])
-    level = context.get("profile", {}).get("cefr_level", "B1")
+    level = context.get("profile", {}).get("cefr_level") or "not assessed"
     result = grammar_analyze(payload.text, level)
     score = int(result.get("score", 0))
     record_activity(

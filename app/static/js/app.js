@@ -122,30 +122,62 @@ async function loadProfile() {
 function renderDashboard() {
   const profile = currentProfile.profile || {};
   const skills = currentProfile.skills || [];
-  document.getElementById("navLevel").textContent = profile.cefr_level || "B1";
 
-  document.getElementById("skillCards").innerHTML = skills.map(s => `
-    <div class="col-md-6 col-xl-4">
-      <div class="card-soft h-100">
-        <div class="text-secondary small">${esc(s.skill)}</div>
-        <div class="skill-score">${esc(s.score)}%</div>
-        <div class="d-flex justify-content-between">
-          <span class="badge text-bg-light">${esc(s.level)}</span>
-          <span class="small text-secondary">${esc(s.attempts)} attempts</span>
+  const assessed = skills.filter(s =>
+    Number(s.attempts || 0) > 0 &&
+    s.score !== null &&
+    s.score !== undefined
+  );
+
+  document.getElementById("navLevel").textContent =
+    profile.cefr_level || "Not assessed";
+
+  document.getElementById("skillCards").innerHTML = skills.map(s => {
+    const isAssessed =
+      Number(s.attempts || 0) > 0 &&
+      s.score !== null &&
+      s.score !== undefined;
+
+    const scoreText = isAssessed ? `${esc(s.score)}%` : "Not assessed";
+    const levelText = isAssessed && s.level ? esc(s.level) : "—";
+
+    return `
+      <div class="col-md-6 col-xl-4">
+        <div class="card-soft h-100">
+          <div class="text-secondary small">${esc(s.skill)}</div>
+          <div class="skill-score">${scoreText}</div>
+          <div class="d-flex justify-content-between">
+            <span class="badge text-bg-light">${levelText}</span>
+            <span class="small text-secondary">${esc(s.attempts || 0)} attempts</span>
+          </div>
         </div>
       </div>
-    </div>
-  `).join("");
+    `;
+  }).join("");
 
-  const weakest = [...skills].sort((a,b)=>a.score-b.score)[0];
+  const weakest = assessed.length
+    ? [...assessed].sort((a, b) => Number(a.score) - Number(b.score))[0]
+    : null;
+
   document.getElementById("recommendation").innerHTML = weakest
-    ? `Your lowest tracked area is <strong>${esc(weakest.skill)}</strong> (${esc(weakest.score)}%). Try a short practice there next.`
-    : "Start with a short diagnostic activity.";
+    ? `Your lowest assessed area is <strong>${esc(weakest.skill)}</strong> (${esc(weakest.score)}%). Try a short practice there next.`
+    : "No skills have been assessed yet. Start with a short diagnostic activity.";
 
   document.getElementById("progressTable").innerHTML = `
     <div class="table-responsive"><table class="table align-middle">
       <thead><tr><th>Skill</th><th>Score</th><th>CEFR</th><th>Attempts</th></tr></thead>
-      <tbody>${skills.map(s => `<tr><td>${esc(s.skill)}</td><td>${esc(s.score)}%</td><td>${esc(s.level)}</td><td>${esc(s.attempts)}</td></tr>`).join("")}</tbody>
+      <tbody>${skills.map(s => {
+        const isAssessed =
+          Number(s.attempts || 0) > 0 &&
+          s.score !== null &&
+          s.score !== undefined;
+        return `<tr>
+          <td>${esc(s.skill)}</td>
+          <td>${isAssessed ? `${esc(s.score)}%` : "Not assessed"}</td>
+          <td>${isAssessed && s.level ? esc(s.level) : "—"}</td>
+          <td>${esc(s.attempts || 0)}</td>
+        </tr>`;
+      }).join("")}</tbody>
     </table></div>`;
 
   document.getElementById("recentActivity").innerHTML = (currentProfile.recent || []).length

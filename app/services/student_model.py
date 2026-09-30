@@ -27,8 +27,8 @@ def ensure_profile(user_id: str, email: str | None = None) -> None:
             "user_id": user_id,
             "category": category,
             "skill": label,
-            "score": 50,
-            "level": "B1",
+            "score": None,
+            "level": None,
             "attempts": 0,
         }
         for category, label in DEFAULT_SKILLS
@@ -97,9 +97,14 @@ def record_activity(
 
     old = row.data[0]
     attempts = int(old.get("attempts") or 0)
-    old_score = float(old.get("score") or 50)
-    # Smoothed score: recent work counts, but one attempt cannot destroy the profile.
-    new_score = round((old_score * min(attempts, 4) + score) / (min(attempts, 4) + 1))
+    old_score = float(old["score"]) if old.get("score") is not None else float(score)
+    # First assessed attempt becomes the first real score.
+    # Later attempts use a capped smoothing window.
+    if attempts == 0:
+        new_score = round(score)
+    else:
+        weight = min(attempts, 4)
+        new_score = round((old_score * weight + score) / (weight + 1))
     level = score_to_cefr(new_score)
 
     (
@@ -116,19 +121,30 @@ def record_activity(
         .execute()
     )
 
-    # Update overall CEFR from mean skill score.
+    # Determine an overall CEFR only after there is enough evidence.
+    # Until at least 3 different skill categories have been assessed,
+    # the overall level remains NULL / "Not assessed".
     all_skills = (
         db.table("student_skills")
-        .select("score")
+        .select("score,attempts")
         .eq("user_id", user_id)
         .execute()
     )
-    scores = [float(x["score"]) for x in (all_skills.data or []) if x.get("score") is not None]
-    if scores:
-        overall = round(sum(scores) / len(scores))
-        db.table("profiles").update(
-            {"cefr_level": score_to_cefr(overall)}
-        ).eq("id", user_id).execute()
+    assessed_scores = [
+        float(x["score"])
+        for x in (all_skills.data or [])
+        if int(x.get("attempts") or 0) > 0 and x.get("score") is not None
+    ]
+
+    if len(assessed_scores) >= 3:
+        overall = round(sum(assessed_scores) / len(assessed_scores))
+        overall_level = score_to_cefr(overall)
+    else:
+        overall_level = None
+
+    db.table("profiles").update(
+        {"cefr_level": overall_level}
+    ).eq("id", user_id).execute()
 
 
 def score_to_cefr(score: float) -> str:
