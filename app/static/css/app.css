@@ -1,3 +1,7 @@
+/* Critical interface fallback: keep auth/app/page visibility working
+   even if an external CSS dependency is unavailable. */
+.d-none { display: none !important; }
+
 :root {
   --ink: #172033;
   --muted: #6b7280;
