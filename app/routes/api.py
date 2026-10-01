@@ -18,7 +18,7 @@ from app.agents.grammar_agent import analyze as grammar_analyze
 from app.agents.writing_agent import analyze as writing_analyze
 from app.agents.vocabulary_agent import create_set, create_practice
 from app.agents.assessment_agent import generate as generate_test
-from app.services.openai_service import ask_text, transcribe_audio, synthesize_speech
+from app.services.openai_service import ask_text, ask_json, transcribe_audio, synthesize_speech
 from app.agents.ielts_agent import (
     generate_writing_prompt as ielts_generate_writing_prompt,
     assess_writing as ielts_assess_writing,
@@ -187,8 +187,15 @@ def grammar(payload: TextPayload, user=Depends(require_user)):
     level = context.get("profile", {}).get("cefr_level") or "not assessed"
     result = grammar_analyze(payload.text, level)
     score = int(result.get("score", 0))
+    estimated_level = result.get("estimated_level")
     record_activity(
-        user["id"], "grammar", result.get("topic", "Grammar"), score, result
+        user["id"],
+        "grammar",
+        result.get("topic", "Grammar"),
+        score,
+        result,
+        tested_level=estimated_level,
+        evidence_source="ai_estimated_free_text",
     )
     return result
 
@@ -197,8 +204,27 @@ def grammar(payload: TextPayload, user=Depends(require_user)):
 def writing(payload: WritingPayload, user=Depends(require_user)):
     result = writing_analyze(payload.text, payload.purpose)
     score = int(result.get("score", 0))
+    estimated_level = result.get("estimated_level")
+
+    # Preserve the detailed writing attempt independently of the dashboard model.
+    admin_db().table("writing_attempts").insert({
+        "user_id": user["id"],
+        "purpose": payload.purpose,
+        "original_text": payload.text,
+        "revised_text": result.get("revised_sample"),
+        "score": score,
+        "estimated_level": estimated_level,
+        "feedback": result,
+    }).execute()
+
     record_activity(
-        user["id"], "writing", result.get("topic", payload.purpose), score, result
+        user["id"],
+        "writing",
+        result.get("topic", payload.purpose),
+        score,
+        result,
+        tested_level=estimated_level,
+        evidence_source="ai_estimated_writing_sample",
     )
     return result
 
@@ -414,6 +440,8 @@ def vocabulary_practice_submit(payload: VocabularyPracticeSubmission, user=Depen
             "total": total,
             "attempt_id": attempt_id,
         },
+        tested_level=test.get("level"),
+        evidence_source="explicit_cefr_vocabulary_practice",
     )
 
     return {
@@ -433,15 +461,25 @@ def test_generate(payload: TestPayload, user=Depends(require_user)):
 def test_submit(payload: TestSubmission, user=Depends(require_user)):
     correct = 0
     details = []
+    by_skill: dict[str, dict[str, int]] = {}
+
     for q in payload.questions:
         qid = str(q.get("id"))
         chosen = payload.answers.get(qid)
         expected = q.get("answer_index")
         ok = chosen == expected
         correct += int(ok)
+
+        skill = str(q.get("skill") or "").lower().strip()
+        if skill in {"grammar", "vocabulary", "reading"}:
+            bucket = by_skill.setdefault(skill, {"correct": 0, "total": 0})
+            bucket["total"] += 1
+            bucket["correct"] += int(ok)
+
         details.append(
             {
                 "id": q.get("id"),
+                "skill": skill or None,
                 "correct": ok,
                 "chosen": chosen,
                 "answer_index": expected,
@@ -449,36 +487,168 @@ def test_submit(payload: TestSubmission, user=Depends(require_user)):
             }
         )
 
-    score = round(correct / max(len(payload.questions), 1) * 100)
-    record_activity(
-        user["id"], "grammar", f"Mini-test: {payload.title}", score,
-        {"level": payload.level, "details": details},
-    )
-    return {"score": score, "correct": correct, "total": len(payload.questions), "details": details}
+    total = len(payload.questions)
+    score = round(correct / max(total, 1) * 100)
 
+    # Save the diagnostic as its own assessment, not as "Grammar".
+    db = admin_db()
+    test_row = db.table("tests").insert({
+        "user_id": user["id"],
+        "title": payload.title,
+        "test_type": "adaptive_diagnostic",
+        "focus": "mixed",
+        "level": payload.level,
+        "questions": payload.questions,
+    }).execute()
+    test_id = test_row.data[0]["id"]
+
+    attempt_row = db.table("test_attempts").insert({
+        "user_id": user["id"],
+        "test_id": test_id,
+        "title": payload.title,
+        "level": payload.level,
+        "focus": "mixed",
+        "score": score,
+        "correct_count": correct,
+        "total_count": total,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "metadata": {"type": "adaptive_diagnostic", "by_skill": by_skill},
+    }).execute()
+    attempt_id = attempt_row.data[0]["id"]
+
+    answer_rows = []
+    for q, detail in zip(payload.questions, details):
+        chosen_idx = detail.get("chosen")
+        expected_idx = detail.get("answer_index")
+        options = q.get("options") or []
+        answer_rows.append({
+            "attempt_id": attempt_id,
+            "question_number": int(q.get("id") or 0),
+            "skill": detail.get("skill"),
+            "question": q.get("question") or "",
+            "selected_answer": options[chosen_idx] if isinstance(chosen_idx, int) and 0 <= chosen_idx < len(options) else None,
+            "correct_answer": options[expected_idx] if isinstance(expected_idx, int) and 0 <= expected_idx < len(options) else None,
+            "is_correct": detail.get("correct"),
+            "explanation": detail.get("explanation"),
+        })
+    if answer_rows:
+        db.table("test_answers").insert(answer_rows).execute()
+
+    # The overall mixed score is an activity, not a CEFR promotion.
+    record_activity(
+        user["id"],
+        "diagnostic",
+        f"Mini-test: {payload.title}",
+        score,
+        {
+            "tested_level": payload.level,
+            "attempt_id": attempt_id,
+            "by_skill": by_skill,
+        },
+        tested_level=payload.level,
+        evidence_source="adaptive_mixed_diagnostic",
+        update_skill=False,
+    )
+
+    # Update a specific skill only when the test actually contained at least
+    # two questions for that skill. One question is too weak as CEFR evidence.
+    skill_results = {}
+    for skill, stats in by_skill.items():
+        if stats["total"] < 2:
+            continue
+        skill_score = round(stats["correct"] / stats["total"] * 100)
+        skill_results[skill] = {
+            "score": skill_score,
+            "correct": stats["correct"],
+            "total": stats["total"],
+        }
+        record_activity(
+            user["id"],
+            skill,
+            f"Mini-test {payload.level}: {payload.title}",
+            skill_score,
+            {
+                "tested_level": payload.level,
+                "source": "mini_test",
+                "question_count": stats["total"],
+            },
+            tested_level=payload.level,
+            evidence_source="explicit_cefr_mini_test",
+        )
+
+    return {
+        "score": score,
+        "correct": correct,
+        "total": total,
+        "details": details,
+        "skill_results": skill_results,
+        "tested_level": payload.level,
+        "mastery_status": (
+            "developing" if score < 70 else
+            "proficient" if score < 85 else
+            "strong"
+        ),
+    }
 
 @router.post("/speaking")
 def speaking(payload: SpeakingPayload, user=Depends(require_user)):
-    # Browser speech-to-text sends the transcript. The AI evaluates language,
-    # not acoustic pronunciation. This avoids pretending text alone can score pronunciation.
-    prompt = f"""You are evaluating an English speaking-practice transcript.
-Scenario: {payload.scenario}
+    # Transcript-only speaking feedback. Pronunciation remains intentionally unscored.
+    instructions = """
+You are an English speaking-practice coach evaluating a TRANSCRIPT only.
+Return JSON with exactly:
+practice_score (integer 0-100),
+estimated_level (one of A1/A2/B1/B2/C1/C2; approximate transcript evidence only),
+fluency_coherence (integer 0-100),
+lexical_resource (integer 0-100),
+grammar_accuracy (integer 0-100),
+positive_point (string),
+correction (string),
+suggestion (string),
+follow_up_question (string),
+disclaimer (string).
 
-Return feedback in plain text with:
-- one brief positive point
-- corrected version of the most important language error (if any)
-- fluency/vocabulary suggestion
-- one follow-up question to continue the role-play
-
-Do NOT claim to evaluate pronunciation because only a transcript is available.
-
-Transcript:
-{payload.text}
+practice_score must be the rounded average of fluency_coherence, lexical_resource,
+and grammar_accuracy. Do not score pronunciation or claim to have heard acoustic features.
+estimated_level must be based on complexity/control visible in the transcript, not directly
+mapped from practice_score.
 """
-    answer = ask_text("You are a concise CEFR-aware speaking coach.", prompt)
-    record_activity(user["id"], "speaking", payload.scenario, None, {"transcript": payload.text})
-    return {"feedback": answer}
+    result = ask_json(
+        instructions,
+        f"Scenario: {payload.scenario}\nTranscript:\n{payload.text}",
+    )
 
+    component_scores = [
+        int(result.get("fluency_coherence", 0)),
+        int(result.get("lexical_resource", 0)),
+        int(result.get("grammar_accuracy", 0)),
+    ]
+    practice_score = round(sum(component_scores) / 3)
+    result["practice_score"] = practice_score
+    estimated_level = result.get("estimated_level")
+
+    admin_db().table("speaking_attempts").insert({
+        "user_id": user["id"],
+        "scenario": payload.scenario,
+        "transcript": payload.text,
+        "score": practice_score,
+        "estimated_level": estimated_level,
+        "fluency_score": component_scores[0],
+        "vocabulary_score": component_scores[1],
+        "grammar_score": component_scores[2],
+        "pronunciation_score": None,
+        "feedback": result,
+    }).execute()
+
+    record_activity(
+        user["id"],
+        "speaking",
+        payload.scenario,
+        practice_score,
+        result,
+        tested_level=estimated_level,
+        evidence_source="transcript_only_speaking_sample",
+    )
+    return result
 
 @router.post("/audio/transcribe")
 async def audio_transcribe(
@@ -514,6 +684,7 @@ async def audio_transcribe(
     record_activity(
         user["id"], "speaking", f"Transcription: {scenario}", None,
         {"transcript": transcript, "source": "gpt-4o-mini-transcribe"},
+        update_skill=False,
     )
     return {"transcript": transcript}
 

@@ -134,6 +134,11 @@ function renderDashboard() {
   document.getElementById("navLevel").textContent =
     profile.cefr_level || "Not assessed";
 
+  const masteryLabel = (s) => {
+    if (!s.mastery_status) return "";
+    return s.mastery_status.charAt(0).toUpperCase() + s.mastery_status.slice(1);
+  };
+
   document.getElementById("skillCards").innerHTML = skills.map(s => {
     const isAssessed =
       Number(s.attempts || 0) > 0 &&
@@ -142,32 +147,57 @@ function renderDashboard() {
 
     const scoreText = isAssessed ? `${esc(s.score)}%` : "Not assessed";
     const levelText = isAssessed && s.level ? esc(s.level) : "—";
+    const masteryText = isAssessed && s.mastery_status
+      ? ` · ${esc(masteryLabel(s))}`
+      : "";
 
     return `
       <div class="col-md-6 col-xl-4">
         <div class="card-soft h-100">
           <div class="text-secondary small">${esc(s.skill)}</div>
           <div class="skill-score">${scoreText}</div>
-          <div class="d-flex justify-content-between">
-            <span class="badge text-bg-light">${levelText}</span>
+          <div class="d-flex justify-content-between align-items-center gap-2">
+            <span class="badge text-bg-light">${levelText}${masteryText}</span>
             <span class="small text-secondary">${esc(s.attempts || 0)} attempts</span>
           </div>
+          ${s.last_tested_level && s.last_tested_level !== s.level
+            ? `<div class="small text-secondary mt-2">Latest evidence: ${esc(s.last_tested_level)} · ${esc(s.last_test_score)}%</div>`
+            : ""}
         </div>
       </div>
     `;
   }).join("");
 
+  const masteryRank = {developing: 0, proficient: 1, strong: 2};
   const weakest = assessed.length
-    ? [...assessed].sort((a, b) => Number(a.score) - Number(b.score))[0]
+    ? [...assessed].sort((a, b) => {
+        const ma = masteryRank[a.mastery_status] ?? 9;
+        const mb = masteryRank[b.mastery_status] ?? 9;
+        if (ma !== mb) return ma - mb;
+        return Number(a.score) - Number(b.score);
+      })[0]
     : null;
 
-  document.getElementById("recommendation").innerHTML = weakest
-    ? `Your lowest assessed area is <strong>${esc(weakest.skill)}</strong> (${esc(weakest.score)}%). Try a short practice there next.`
-    : "No skills have been assessed yet. Start with a short diagnostic activity.";
+  if (!weakest) {
+    document.getElementById("recommendation").innerHTML =
+      "No skills have been assessed yet. Start with a short diagnostic activity.";
+  } else {
+    const currentLevel = weakest.level || "current";
+    const nextMap = {A1:"A2", A2:"B1", B1:"B2", B2:"C1", C1:"C2", C2:null};
+    const next = nextMap[weakest.level] || null;
+
+    if (weakest.mastery_status === "strong" && next) {
+      document.getElementById("recommendation").innerHTML =
+        `<strong>${esc(weakest.skill)}</strong> is strong at ${esc(currentLevel)}. Try a ${esc(next)} diagnostic before raising the level.`;
+    } else {
+      document.getElementById("recommendation").innerHTML =
+        `<strong>${esc(weakest.skill)}</strong> is your weakest assessed area: ${esc(currentLevel)} · ${esc(masteryLabel(weakest) || "developing")} (${esc(weakest.score)}%). Practice this level before moving up.`;
+    }
+  }
 
   document.getElementById("progressTable").innerHTML = `
     <div class="table-responsive"><table class="table align-middle">
-      <thead><tr><th>Skill</th><th>Score</th><th>CEFR</th><th>Attempts</th></tr></thead>
+      <thead><tr><th>Skill</th><th>Score</th><th>Assessed level</th><th>Mastery</th><th>Attempts</th></tr></thead>
       <tbody>${skills.map(s => {
         const isAssessed =
           Number(s.attempts || 0) > 0 &&
@@ -177,16 +207,25 @@ function renderDashboard() {
           <td>${esc(s.skill)}</td>
           <td>${isAssessed ? `${esc(s.score)}%` : "Not assessed"}</td>
           <td>${isAssessed && s.level ? esc(s.level) : "—"}</td>
+          <td>${isAssessed && s.mastery_status ? esc(masteryLabel(s)) : "—"}</td>
           <td>${esc(s.attempts || 0)}</td>
         </tr>`;
       }).join("")}</tbody>
     </table></div>`;
 
   document.getElementById("recentActivity").innerHTML = (currentProfile.recent || []).length
-    ? currentProfile.recent.map(r => `<div class="py-2 border-bottom"><strong>${esc(r.activity_type)}</strong> · ${esc(r.topic)} ${r.score != null ? `— ${esc(r.score)}%` : ""}</div>`).join("")
+    ? currentProfile.recent.map(r => {
+        const type = r.metadata?.evidence_source ? "assessment" :
+          (String(r.activity_type).includes("diagnostic") ? "diagnostic" :
+          (String(r.topic).startsWith("Transcription:") ? "transcription" : "practice"));
+        return `<div class="py-2 border-bottom">
+          <strong>${esc(r.activity_type)}</strong> · ${esc(r.topic)}
+          ${r.score != null ? `— ${esc(r.score)}%` : ""}
+          <span class="badge text-bg-light ms-2">${esc(type)}</span>
+        </div>`;
+      }).join("")
     : `<div class="text-secondary">No activities yet.</div>`;
 }
-
 function openPage(name) {
   document.querySelectorAll(".page").forEach(x => x.classList.add("d-none"));
   document.getElementById(`page-${name}`).classList.remove("d-none");
@@ -640,11 +679,34 @@ async function checkSpeaking() {
   if (!text) return;
   loading("speakingResult", "Preparing speaking feedback…");
   try {
-    const d = await api("/api/speaking", {method:"POST", body:JSON.stringify({text, scenario})});
-    document.getElementById("speakingResult").innerHTML = `<pre class="feedback">${esc(d.feedback)}</pre><button class="btn btn-sm btn-outline-primary mt-2" onclick="speakText(this.previousElementSibling.innerText, this)">🔊 Listen to feedback</button>`;
-  } catch(e) { document.getElementById("speakingResult").textContent = e.message; }
-}
+    const d = await api("/api/speaking", {
+      method:"POST",
+      body:JSON.stringify({text, scenario})
+    });
 
+    document.getElementById("speakingResult").innerHTML = `
+      <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+        <h4>${esc(d.practice_score)}% · approx. ${esc(d.estimated_level || "—")}</h4>
+        <span class="badge text-bg-warning">Pronunciation not assessed</span>
+      </div>
+      <div class="row g-2 my-3">
+        <div class="col-md-4"><div class="card-soft text-center"><div class="small text-secondary">Fluency & coherence</div><div class="skill-score">${esc(d.fluency_coherence)}%</div></div></div>
+        <div class="col-md-4"><div class="card-soft text-center"><div class="small text-secondary">Vocabulary</div><div class="skill-score">${esc(d.lexical_resource)}%</div></div></div>
+        <div class="col-md-4"><div class="card-soft text-center"><div class="small text-secondary">Grammar</div><div class="skill-score">${esc(d.grammar_accuracy)}%</div></div></div>
+      </div>
+      <p><strong>Positive point:</strong> ${esc(d.positive_point || "")}</p>
+      <p><strong>Correction:</strong> ${esc(d.correction || "")}</p>
+      <p><strong>Suggestion:</strong> ${esc(d.suggestion || "")}</p>
+      <p><strong>Follow-up:</strong> ${esc(d.follow_up_question || "")}</p>
+      <p class="small text-secondary">${esc(d.disclaimer || "Transcript-only practice score; pronunciation is not assessed.")}</p>
+      <button class="btn btn-sm btn-outline-primary mt-2"
+        onclick="speakText(this.parentElement.innerText, this)">🔊 Listen to feedback</button>`;
+
+    await loadProfile();
+  } catch(e) {
+    document.getElementById("speakingResult").textContent = e.message;
+  }
+}
 async function generateTest() {
   const level = document.getElementById("testLevel").value;
   const focus = document.getElementById("testFocus").value;
@@ -689,9 +751,20 @@ async function submitTest() {
         answers
       })
     });
+    const mastery = d.mastery_status
+      ? d.mastery_status.charAt(0).toUpperCase() + d.mastery_status.slice(1)
+      : "";
+    const skillSummary = Object.entries(d.skill_results || {})
+      .map(([skill, r]) => `<div class="small">${esc(skill)}: ${esc(r.score)}% (${esc(r.correct)}/${esc(r.total)})</div>`)
+      .join("");
     document.getElementById("testResult").innerHTML += `
-      <div class="alert alert-primary mt-3"><strong>Score: ${esc(d.score)}%</strong> (${esc(d.correct)}/${esc(d.total)})</div>
-      ${(d.details || []).map(x => `<div class="small py-1">${x.correct ? "✅" : "❌"} Q${esc(x.id)} — ${esc(x.explanation)}</div>`).join("")}`;
+      <div class="alert alert-primary mt-3">
+        <strong>${esc(d.tested_level)} diagnostic: ${esc(d.score)}%</strong>
+        (${esc(d.correct)}/${esc(d.total)}) · ${esc(mastery)}
+        <div class="small mt-1">A high score confirms performance at the tested level; it does not automatically raise CEFR.</div>
+      </div>
+      ${skillSummary}
+      ${(d.details || []).map(x => `<div class="small py-1">${x.correct ? "✅" : "❌"} Q${esc(x.id)} ${x.skill ? `· ${esc(x.skill)}` : ""} — ${esc(x.explanation)}</div>`).join("")}`;
     await loadProfile();
   } catch(e) { alert(e.message); }
 }
