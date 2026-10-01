@@ -4,7 +4,6 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{ app_name }}</title>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <link rel="stylesheet" href="/static/css/bootstrap.min.css">
   <link rel="stylesheet" href="/static/css/app.css">
 </head>
@@ -303,6 +302,7 @@
     supabaseAnonKey: {{ supabase_anon_key | tojson }}
   };
 </script>
+<script src="/static/js/supabase-auth.js"></script>
 <script src="/static/js/app.js"></script>
 </body>
 </html>
