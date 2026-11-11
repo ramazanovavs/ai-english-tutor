@@ -1,6 +1,7 @@
 from pathlib import Path
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+import logging
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -12,6 +13,13 @@ BASE_DIR = Path(__file__).resolve().parent
 
 app = FastAPI(title=settings.app_name)
 app.include_router(api_router)
+
+
+@app.exception_handler(Exception)
+async def unhandled_error(request: Request, exc: Exception):
+    # Return JSON so the frontend shows the real reason instead of "Request failed".
+    logging.getLogger(__name__).exception("Unhandled error on %s", request.url.path)
+    return JSONResponse(status_code=500, content={"detail": f"Server error: {exc}"})
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
