@@ -24,6 +24,15 @@ def _valid_level(level: str | None) -> str | None:
     return level if level in CEFR_LEVELS else None
 
 
+def _as_int_score(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return max(0, min(100, int(round(float(value)))))
+    except (TypeError, ValueError):
+        return None
+
+
 def mastery_from_score(score: int | float | None) -> str | None:
     if score is None:
         return None
@@ -152,6 +161,8 @@ def record_activity(
     """
     db = admin_db()
     metadata = dict(metadata or {})
+    # DB score columns are INTEGER: never send 80.0, always 80.
+    score = _as_int_score(score)
     tested_level = _valid_level(tested_level or metadata.get("tested_level") or metadata.get("level"))
 
     if tested_level:
@@ -198,7 +209,9 @@ def record_activity(
     old_level = _valid_level(old.get("level"))
     attempts = int(old.get("attempts") or 0)
     old_score = old.get("score")
-    old_score = float(old_score) if old_score is not None else None
+    # Supabase may return the stored score as 80.0; keep it an integer,
+    # otherwise the update below fails with "invalid input syntax for type integer".
+    old_score = _as_int_score(old_score)
 
     tested_idx = CEFR_LEVELS.index(tested_level)
     old_idx = CEFR_LEVELS.index(old_level) if old_level else None
