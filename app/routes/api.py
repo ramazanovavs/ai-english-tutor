@@ -1,4 +1,6 @@
 import json
+import logging
+import re
 
 from typing import Literal
 from datetime import datetime, timezone
@@ -52,6 +54,8 @@ from app.services.ielts_mock_service import (
     set_mock_metadata as mock_set_metadata,
     finish_mock as mock_finish,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
@@ -200,32 +204,63 @@ def grammar(payload: TextPayload, user=Depends(require_user)):
     return result
 
 
+_CEFR_RE = re.compile(r"\b(A1|A2|B1|B2|C1|C2)\b", re.I)
+
+
+def _clean_level(value) -> str | None:
+    """The model sometimes returns 'A2 (approximate)' or 'A1-A2'; the DB accepts only A1..C2."""
+    match = _CEFR_RE.search(str(value or ""))
+    return match.group(1).upper() if match else None
+
+
+def _clean_score(value) -> int:
+    try:
+        return max(0, min(100, int(round(float(value)))))
+    except (TypeError, ValueError):
+        return 0
+
+
 @router.post("/writing")
 def writing(payload: WritingPayload, user=Depends(require_user)):
-    result = writing_analyze(payload.text, payload.purpose)
-    score = int(result.get("score", 0))
-    estimated_level = result.get("estimated_level")
+    try:
+        result = writing_analyze(payload.text, payload.purpose)
+    except Exception as exc:
+        logger.exception("Writing analysis failed")
+        raise HTTPException(status_code=502, detail=f"AI review failed: {exc}")
 
-    # Preserve the detailed writing attempt independently of the dashboard model.
-    admin_db().table("writing_attempts").insert({
-        "user_id": user["id"],
-        "purpose": payload.purpose,
-        "original_text": payload.text,
-        "revised_text": result.get("revised_sample"),
-        "score": score,
-        "estimated_level": estimated_level,
-        "feedback": result,
-    }).execute()
+    score = _clean_score(result.get("score"))
+    estimated_level = _clean_level(result.get("estimated_level"))
+    result["score"] = score
+    result["estimated_level"] = estimated_level or result.get("estimated_level")
 
-    record_activity(
-        user["id"],
-        "writing",
-        result.get("topic", payload.purpose),
-        score,
-        result,
-        tested_level=estimated_level,
-        evidence_source="ai_estimated_writing_sample",
-    )
+    # Saving must never hide the feedback from the learner.
+    try:
+        ensure_profile(user["id"], user.get("email"))
+        admin_db().table("writing_attempts").insert({
+            "user_id": user["id"],
+            "purpose": payload.purpose,
+            "original_text": payload.text,
+            "revised_text": result.get("revised_sample"),
+            "score": score,
+            "estimated_level": estimated_level,
+            "feedback": result,
+        }).execute()
+    except Exception:
+        logger.exception("Could not save writing attempt")
+
+    try:
+        record_activity(
+            user["id"],
+            "writing",
+            str(result.get("topic") or payload.purpose),
+            score,
+            result,
+            tested_level=estimated_level,
+            evidence_source="ai_estimated_writing_sample",
+        )
+    except Exception:
+        logger.exception("Could not record writing activity")
+
     return result
 
 
