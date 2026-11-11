@@ -24,7 +24,7 @@ async function api(path, options = {}) {
   };
   const res = await fetch(path, {...options, headers});
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || "Request failed");
+  if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
   return data;
 }
 
@@ -37,7 +37,7 @@ async function apiForm(path, formData) {
     body: formData
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || "Request failed");
+  if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
   return data;
 }
 
