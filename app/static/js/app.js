@@ -231,6 +231,8 @@ function openPage(name) {
   document.getElementById(`page-${name}`).classList.remove("d-none");
   document.querySelectorAll(".menu-btn").forEach(x => x.classList.toggle("active", x.dataset.page === name));
   if (name === "progress" || name === "dashboard") loadProfile();
+  if (name === "listening") suggestListeningLevel();
+  if (name !== "listening" && typeof stopListeningAudio === "function") stopListeningAudio();
 }
 
 document.querySelectorAll(".menu-btn").forEach(btn => {
@@ -1481,3 +1483,330 @@ openPage = function(name) {
   openPageBeforeFullMock(name);
   if (name === "ielts-mock") resumeFullIELTSMock();
 };
+
+
+/* ===================== Listening Practice (General English) ===================== */
+
+let currentListening = null;      // {test_id, title, level, questions, max_plays, ...}
+let listeningAudio = null;        // HTMLAudioElement currently playing
+let listeningPlaysLeft = 0;
+let listeningLevelTouched = false;
+let listeningChecked = false;
+
+const LISTENING_TYPE_LABEL = {
+  gist: "Main idea",
+  detail: "Detail",
+  tfng: "True / False / Not Given",
+  gap: "Gap fill"
+};
+
+document.getElementById("listeningLevel")?.addEventListener("change", () => { listeningLevelTouched = true; });
+
+function suggestListeningLevel() {
+  const hint = document.getElementById("listeningLevelHint");
+  const select = document.getElementById("listeningLevel");
+  if (!select || !hint) return;
+  const skills = currentProfile?.skills || [];
+  const listening = skills.find(s => s.category === "listening");
+  let level = null, source = "";
+  if (listening && Number(listening.attempts || 0) > 0 && listening.level) {
+    level = listening.level; source = "your current Listening level";
+  } else if (currentProfile?.profile?.cefr_level) {
+    level = currentProfile.profile.cefr_level; source = "your overall level";
+  } else {
+    level = "B1"; source = "default level, Listening is not assessed yet";
+  }
+  if (!listeningLevelTouched) select.value = level;
+  hint.textContent = `Suggested: ${level} (${source}). You can choose another level.`;
+  loadListeningBankPanel();
+}
+
+/* Admin: backup bank of ready-made tests (shown only to ADMIN_EMAILS) */
+let listeningBankTimer = null;
+
+async function loadListeningBankPanel() {
+  const box = document.getElementById("listeningAdmin");
+  if (!box || !currentSession) return;
+  let d;
+  try {
+    const res = await fetch("/api/listening/bank/status", {
+      headers: {"Authorization": `Bearer ${currentSession.access_token}`}
+    });
+    if (!res.ok) { box.innerHTML = ""; return; }  // not an admin
+    d = await res.json();
+  } catch { return; }
+  const per = d.per_level || 5;
+  box.innerHTML = `
+    <div class="card-soft">
+      <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div>
+          <h5 class="mb-1">Backup bank <span class="badge text-bg-secondary">admin</span></h5>
+          <div class="small text-secondary">Ready-made tests used only when OpenAI is unavailable. Up to ${per} per level.</div>
+        </div>
+        <button class="btn btn-outline-primary btn-sm" ${d.running ? "disabled" : ""} onclick="fillListeningBank()">
+          ${d.running ? "Filling…" : "Fill missing tests"}
+        </button>
+      </div>
+      <div class="d-flex flex-wrap gap-2 mt-3">
+        ${Object.entries(d.counts || {}).map(([lvl, n]) =>
+          `<span class="badge ${n >= per ? "text-bg-success" : "text-bg-light"}">${esc(lvl)}: ${esc(n)}/${per}</span>`).join("")}
+      </div>
+      ${d.message ? `<div class="small text-secondary mt-2">${esc(d.message)} · created ${esc(d.done)}, errors ${esc(d.failed)}</div>` : ""}
+    </div>`;
+  clearTimeout(listeningBankTimer);
+  if (d.running) listeningBankTimer = setTimeout(loadListeningBankPanel, 5000);
+}
+
+async function fillListeningBank() {
+  try {
+    await api("/api/listening/bank/fill", {method: "POST"});
+  } catch (e) { alert(e.message); }
+  loadListeningBankPanel();
+}
+
+function stopListeningAudio() {
+  if (listeningAudio) {
+    listeningAudio.pause();
+    if (listeningAudio.src?.startsWith("blob:")) URL.revokeObjectURL(listeningAudio.src);
+    listeningAudio = null;
+  }
+  document.getElementById("listeningPauseBtn")?.classList.add("d-none");
+  updateListeningPlayInfo();
+}
+
+async function generateListening(useBackup = false) {
+  const btn = document.getElementById("listeningGenerateBtn");
+  const area = document.getElementById("listeningArea");
+  stopListeningAudio();
+  btn.disabled = true;
+  btn.textContent = "Generating…";
+  area.innerHTML = `<div class="loader">${useBackup === true ? "Loading a backup test…" : "Writing the recording and 10 questions…"}</div>`;
+  try {
+    currentListening = await api("/api/listening/generate", {
+      method: "POST",
+      body: JSON.stringify({
+        level: document.getElementById("listeningLevel").value,
+        format: document.getElementById("listeningFormat").value,
+        topic: document.getElementById("listeningTopic").value.trim(),
+        use_backup: useBackup === true
+      })
+    });
+    listeningPlaysLeft = currentListening.max_plays || 3;
+    listeningChecked = false;
+    renderListening();
+  } catch (e) {
+    area.innerHTML = `<div class="alert alert-danger">${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Generate";
+  }
+}
+
+function renderListening() {
+  const t = currentListening;
+  const formatLabel = {dialogue: "Dialogue", monologue: "Monologue", announcement: "Announcement"}[t.format] || t.format;
+  document.getElementById("listeningArea").innerHTML = `
+    ${t.backup ? `<div class="alert alert-info"><strong>Backup test.</strong> ${esc(t.notice || "")}</div>` : ""}
+    <div class="card-soft listening-player mb-3">
+      <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div>
+          <h4 class="mb-1">${esc(t.title)}</h4>
+          <div class="small text-secondary">${esc(t.level)} · ${esc(formatLabel)} · 10 questions</div>
+        </div>
+        <div class="d-flex gap-2 align-items-center">
+          <button id="listeningPlayBtn" class="btn btn-primary" onclick="playListening()">▶ Play</button>
+          <button id="listeningPauseBtn" class="btn btn-outline-secondary d-none" onclick="toggleListeningPause()">⏸ Pause</button>
+        </div>
+      </div>
+      <div class="progress mt-3" style="height:6px"><div id="listeningProgress" class="progress-bar" style="width:0%"></div></div>
+      <div id="listeningPlayInfo" class="small text-secondary mt-2"></div>
+    </div>
+
+    <form id="listeningForm" onsubmit="return false">
+      ${(t.questions || []).map((q, idx) => {
+        const name = `listen_q_${q.id}`;
+        const control = q.type === "gap"
+          ? `<input class="form-control mt-2" name="${name}" autocomplete="off" placeholder="Write the missing word(s)">`
+          : (q.options || []).map((opt, i) => `
+              <div class="form-check mt-2">
+                <input class="form-check-input" type="radio" name="${name}" id="${name}_${i}" value="${esc(opt)}">
+                <label class="form-check-label" for="${name}_${i}">${esc(opt)}</label>
+              </div>`).join("");
+        return `
+          <div class="card-soft my-3">
+            <div class="small text-secondary">${idx + 1}/10 · ${esc(LISTENING_TYPE_LABEL[q.type] || q.type)}</div>
+            <div class="fw-semibold mt-1">${esc(q.question)}</div>
+            ${control}
+            <div id="listen_feedback_${q.id}" class="mt-2"></div>
+          </div>`;
+      }).join("")}
+      <button id="listeningSubmitBtn" type="button" class="btn btn-primary" onclick="submitListening()">Check answers</button>
+    </form>
+    <div id="listeningResult" class="mt-4"></div>`;
+  updateListeningPlayInfo();
+}
+
+function updateListeningPlayInfo() {
+  const info = document.getElementById("listeningPlayInfo");
+  const btn = document.getElementById("listeningPlayBtn");
+  if (!info || !btn) return;
+  if (listeningChecked) {
+    info.textContent = "Review mode: you can listen as many times as you like.";
+    if (listeningAudio) return;
+    btn.disabled = false;
+    btn.textContent = "▶ Play again";
+    return;
+  }
+  info.textContent = `Plays left: ${listeningPlaysLeft} of ${currentListening.max_plays || 3}. The first play may take a few seconds while the audio is prepared.`;
+  if (listeningAudio) return;  // a play is in progress: keep the "Playing…" state
+  btn.disabled = listeningPlaysLeft <= 0;
+  btn.textContent = listeningPlaysLeft <= 0 ? "No plays left" : "▶ Play";
+}
+
+async function playListening() {
+  if (!currentListening) return;
+  const btn = document.getElementById("listeningPlayBtn");
+  const pauseBtn = document.getElementById("listeningPauseBtn");
+  const bar = document.getElementById("listeningProgress");
+  stopListeningAudio();
+  btn.disabled = true;
+  btn.textContent = "Loading audio…";
+  try {
+    const res = await fetch(`/api/listening/${currentListening.test_id}/audio`, {
+      headers: {"Authorization": `Bearer ${currentSession.access_token}`}
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      if (res.status === 403) listeningPlaysLeft = 0;
+      const err = new Error(d.detail || `Could not load the audio (${res.status}).`);
+      err.audioFailed = res.status === 502;
+      throw err;
+    }
+    const left = res.headers.get("X-Plays-Left");
+    if (left !== null) listeningPlaysLeft = Number(left);
+    const url = URL.createObjectURL(await res.blob());
+    const audio = new Audio(url);
+    listeningAudio = audio;
+    audio.ontimeupdate = () => {
+      if (audio.duration && isFinite(audio.duration)) bar.style.width = `${(audio.currentTime / audio.duration) * 100}%`;
+    };
+    audio.onended = () => {
+      bar.style.width = "100%";
+      stopListeningAudio();
+    };
+    btn.textContent = "Playing…";
+    btn.disabled = true;
+    pauseBtn.textContent = "⏸ Pause";
+    pauseBtn.classList.remove("d-none");
+    updateListeningPlayInfo();
+    await audio.play();
+  } catch (e) {
+    stopListeningAudio();
+    document.getElementById("listeningPlayInfo").innerHTML =
+      `<span class="text-danger">${esc(e.message)}</span>` +
+      (e.audioFailed && !listeningChecked && !currentListening.backup
+        ? ` <button class="btn btn-sm btn-outline-primary ms-2" onclick="generateListening(true)">Use a backup test</button>`
+        : "");
+  }
+}
+
+function toggleListeningPause() {
+  const pauseBtn = document.getElementById("listeningPauseBtn");
+  if (!listeningAudio) return;
+  if (listeningAudio.paused) { listeningAudio.play(); pauseBtn.textContent = "⏸ Pause"; }
+  else { listeningAudio.pause(); pauseBtn.textContent = "▶ Resume"; }
+}
+
+function collectListeningAnswers() {
+  const answers = {};
+  for (const q of (currentListening?.questions || [])) {
+    const name = `listen_q_${q.id}`;
+    const radio = document.querySelector(`input[name="${name}"]:checked`);
+    const text = document.querySelector(`input[name="${name}"]:not([type="radio"])`);
+    answers[String(q.id)] = radio ? radio.value : (text ? text.value.trim() : "");
+  }
+  return answers;
+}
+
+async function submitListening() {
+  if (!currentListening || listeningChecked) return;
+  const answers = collectListeningAnswers();
+  const empty = Object.values(answers).filter(v => !String(v).trim()).length;
+  if (empty && !confirm(`${empty} question(s) are not answered. Check anyway?`)) return;
+
+  const btn = document.getElementById("listeningSubmitBtn");
+  btn.disabled = true;
+  btn.textContent = "Checking…";
+  try {
+    const d = await api("/api/listening/submit", {
+      method: "POST",
+      body: JSON.stringify({test_id: currentListening.test_id, answers})
+    });
+    listeningChecked = true;
+
+    for (const item of (d.details || [])) {
+      const el = document.getElementById(`listen_feedback_${item.id}`);
+      if (!el) continue;
+      el.innerHTML = item.correct
+        ? `<div class="small text-success"><strong>Correct.</strong> ${esc(item.explanation)}</div>`
+        : `<div class="small text-danger"><strong>Review:</strong> your answer: ${esc(item.answer || "—")}<br>
+             Correct answer: <strong>${esc(item.correct_answer)}</strong><br>
+             <span class="text-secondary">${esc(item.explanation)}</span></div>`;
+    }
+    document.querySelectorAll("#listeningForm input").forEach(el => el.disabled = true);
+    btn.textContent = "Completed";
+
+    document.getElementById("listeningResult").innerHTML = `
+      <div class="alert ${d.score >= 70 ? "alert-success" : "alert-primary"}">
+        <h4 class="mb-1">Listening score: ${esc(d.score)}%</h4>
+        <div>${esc(d.correct)} / ${esc(d.total)} correct · level ${esc(d.level)}</div>
+      </div>
+      <p class="small text-secondary">This practice has been added to your Listening progress.
+        Highlighted parts of the transcript show where each answer is heard; listen again with the text.</p>
+      <div class="card-soft">
+        <h5>Transcript</h5>
+        ${renderListeningTranscript(d.script || [], d.details || [])}
+      </div>`;
+    updateListeningPlayInfo();
+    await loadProfile();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "Check answers";
+    document.getElementById("listeningResult").innerHTML = `<div class="alert alert-danger">${esc(e.message)}</div>`;
+  }
+}
+
+function renderListeningTranscript(script, details) {
+  const evidences = details
+    .filter(d => d.evidence)
+    .map(d => {
+      const words = String(d.evidence).match(/[\w']+/g) || [];
+      if (!words.length) return null;
+      const pattern = words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^\\w']+");
+      return {id: d.id, correct: d.correct, re: new RegExp(pattern, "i"), used: false};
+    })
+    .filter(Boolean);
+
+  return script.map(line => {
+    const text = String(line.text || "");
+    const ranges = [];
+    for (const ev of evidences) {
+      if (ev.used) continue;
+      const m = ev.re.exec(text);
+      if (!m) continue;
+      const start = m.index, end = m.index + m[0].length;
+      if (ranges.some(r => start < r.end && end > r.start)) continue;
+      ranges.push({start, end, id: ev.id, correct: ev.correct});
+      ev.used = true;
+    }
+    ranges.sort((a, b) => a.start - b.start);
+    let html = "", pos = 0;
+    for (const r of ranges) {
+      html += esc(text.slice(pos, r.start));
+      html += `<mark class="listen-evidence ${r.correct ? "ok" : "bad"}" title="Question ${r.id}"><sup>${r.id}</sup>${esc(text.slice(r.start, r.end))}</mark>`;
+      pos = r.end;
+    }
+    html += esc(text.slice(pos));
+    return `<p class="mb-2"><strong>${esc(line.speaker)}:</strong> ${html}</p>`;
+  }).join("");
+}

@@ -19,6 +19,9 @@ from app.agents.tutor_agent import chat as tutor_chat, chat_stream as tutor_chat
 from app.agents.grammar_agent import analyze as grammar_analyze
 from app.agents.writing_agent import analyze as writing_analyze
 from app.agents.vocabulary_agent import create_set, create_practice
+from app.agents import listening_agent
+from app.services import listening_audio, listening_bank
+from app.config import get_settings
 from app.agents.assessment_agent import generate as generate_test
 from app.services.openai_service import ask_text, ask_json, transcribe_audio, synthesize_speech
 from app.agents.ielts_agent import (
@@ -485,6 +488,234 @@ def vocabulary_practice_submit(payload: VocabularyPracticeSubmission, user=Depen
         "total": total,
         "details": details,
     }
+
+
+# ---------------------------------------------------------------- Listening (General English)
+
+class ListeningGeneratePayload(BaseModel):
+    level: Literal["A1", "A2", "B1", "B2", "C1", "C2"] = "B1"
+    topic: str = Field(default="", max_length=100)
+    format: Literal["dialogue", "monologue", "announcement"] = "dialogue"
+    use_backup: bool = False  # learner asked for a backup test after an audio error
+
+
+class ListeningSubmitPayload(BaseModel):
+    test_id: str
+    answers: dict[str, str]
+
+
+def _load_listening_test(test_id: str, user_id: str) -> dict | None:
+    rows = (
+        admin_db().table("tests")
+        .select("*")
+        .eq("id", test_id)
+        .eq("user_id", user_id)
+        .eq("focus", "listening")
+        .limit(1)
+        .execute()
+    ).data
+    if not rows:
+        return None
+    content = rows[0].get("questions") or {}
+    return content if isinstance(content, dict) else None
+
+
+def _listening_public(test_id: str, test: dict, backup: bool, notice: str = "") -> dict:
+    return {
+        "test_id": test_id,
+        "title": test["title"],
+        "level": test.get("level"),
+        "format": test.get("format"),
+        "max_plays": listening_audio.MAX_PLAYS,
+        "backup": backup,
+        "notice": notice,
+        "questions": [
+            {"id": q["id"], "type": q["type"], "question": q["question"], "options": q["options"]}
+            for q in test["questions"]
+        ],
+    }
+
+
+def _listening_from_bank(payload: ListeningGeneratePayload, user: dict, reason: str) -> dict:
+    try:
+        row = listening_bank.pick(payload.level, payload.format, user["id"])
+    except Exception:
+        logger.exception("Backup bank is unavailable")
+        row = None
+    if not row:
+        raise HTTPException(
+            status_code=503,
+            detail=f"{reason} There are no unused backup tests for level {payload.level} yet. Please try again later.",
+        )
+    try:
+        audio = listening_bank.download(row["audio_path"])
+    except Exception as exc:
+        logger.exception("Could not download backup audio")
+        raise HTTPException(status_code=503, detail=f"{reason} The backup audio could not be loaded: {exc}")
+
+    test = dict(row["content"])
+    test.update(level=row["level"], format=row.get("format") or test.get("format"),
+                bank_id=str(row["id"]), audio_path=row["audio_path"])
+    db_row = admin_db().table("tests").insert({
+        "user_id": user["id"],
+        "title": test["title"],
+        "test_type": "listening_bank",
+        "focus": "listening",
+        "level": test["level"],
+        "questions": test,
+    }).execute()
+    test_id = db_row.data[0]["id"]
+    listening_audio.start(test_id, user["id"], test, audio=audio)
+    listening_bank.mark_used(row)
+    return _listening_public(test_id, test, True, f"{reason} This is a ready-made backup test for your level.")
+
+
+@router.post("/listening/generate")
+def listening_generate(payload: ListeningGeneratePayload, user=Depends(require_user)):
+    ensure_profile(user["id"], user.get("email"))
+    if payload.use_backup:
+        return _listening_from_bank(payload, user, "The AI audio service is unavailable right now.")
+
+    try:
+        test = listening_agent.generate(payload.level, payload.topic.strip(), payload.format)
+    except Exception:
+        logger.exception("Listening generation failed; using the backup bank")
+        return _listening_from_bank(payload, user, "The AI service is unavailable right now.")
+
+    test["level"] = payload.level
+    test["format"] = payload.format
+    test["topic"] = payload.topic.strip()
+
+    row = admin_db().table("tests").insert({
+        "user_id": user["id"],
+        "title": test["title"],
+        "test_type": "listening_practice",
+        "focus": "listening",
+        "level": payload.level,
+        "questions": test,  # full content incl. script and key; never sent before checking
+    }).execute()
+    test_id = row.data[0]["id"]
+
+    # Voice in the background; a successful recording may also refill the backup bank.
+    listening_audio.start(
+        test_id, user["id"], test,
+        on_ready=lambda audio: listening_bank.save_if_needed(test, audio),
+    )
+    return _listening_public(test_id, test, False)
+
+
+@router.get("/listening/{test_id}/audio")
+def listening_audio_play(test_id: str, user=Depends(require_user)):
+    try:
+        audio, plays_left = listening_audio.get_for_play(
+            test_id, user["id"],
+            lambda: _load_listening_test(test_id, user["id"]),
+            # After a server restart a backup test reloads its MP3 from Storage, not from TTS.
+            lambda t: (lambda: listening_bank.download(t["audio_path"])) if t.get("audio_path") else None,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except TimeoutError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    headers = {"Cache-Control": "no-store"}
+    if plays_left is not None:
+        headers["X-Plays-Left"] = str(plays_left)
+    return StreamingResponse(BytesIO(audio), media_type="audio/mpeg", headers=headers)
+
+
+@router.post("/listening/submit")
+def listening_submit(payload: ListeningSubmitPayload, user=Depends(require_user)):
+    test = _load_listening_test(payload.test_id, user["id"])
+    if not test:
+        raise HTTPException(status_code=404, detail="Listening practice not found.")
+
+    details, correct = [], 0
+    for q in test.get("questions") or []:
+        given = str(payload.answers.get(str(q["id"]), "")).strip()
+        ok = listening_agent.is_correct(q, given)
+        correct += int(ok)
+        details.append({
+            "id": q["id"],
+            "type": q["type"],
+            "question": q["question"],
+            "answer": given,
+            "correct_answer": q["answer"],
+            "correct": ok,
+            "evidence": q.get("evidence", ""),
+            "explanation": q.get("explanation", ""),
+        })
+
+    total = len(details)
+    score = round(correct / max(total, 1) * 100)
+    level = test.get("level")
+    plays = listening_audio.plays_used(payload.test_id)
+    transcript = "\n".join(f"{l['speaker']}: {l['text']}" for l in test.get("script") or [])
+
+    try:
+        admin_db().table("listening_attempts").insert({
+            "user_id": user["id"],
+            "title": test.get("title"),
+            "transcript": transcript,
+            "level": level,
+            "score": score,
+            "questions": test.get("questions") or [],
+            "answers": details,
+        }).execute()
+    except Exception:
+        logger.exception("Could not save listening attempt")
+
+    record_activity(
+        user["id"],
+        "listening",
+        test.get("title") or "Listening practice",
+        score,
+        {
+            "level": level,
+            "correct": correct,
+            "total": total,
+            "format": test.get("format"),
+            "plays_used": plays,
+            "test_id": payload.test_id,
+        },
+        tested_level=level,
+        evidence_source="explicit_cefr_listening_practice",
+    )
+
+    listening_audio.mark_checked(payload.test_id)
+
+    return {
+        "score": score,
+        "correct": correct,
+        "total": total,
+        "level": level,
+        "details": details,
+        "speakers": test.get("speakers") or [],
+        "script": test.get("script") or [],
+    }
+
+
+def _require_admin(user: dict) -> None:
+    allowed = {e.strip().lower() for e in get_settings().admin_emails.split(",") if e.strip()}
+    if (user.get("email") or "").lower() not in allowed:
+        raise HTTPException(status_code=403, detail="Admin only.")
+
+
+@router.get("/listening/bank/status")
+def listening_bank_status(user=Depends(require_user)):
+    _require_admin(user)
+    return listening_bank.fill_status()
+
+
+@router.post("/listening/bank/fill")
+def listening_bank_fill(user=Depends(require_user)):
+    _require_admin(user)
+    started = listening_bank.start_fill(listening_agent.generate, listening_audio.build_audio)
+    return {"started": started, **listening_bank.fill_status()}
 
 
 @router.post("/test/generate")

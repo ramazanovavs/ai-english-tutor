@@ -120,3 +120,9 @@ pre.feedback { white-space: pre-wrap; font-family: inherit; margin: 0; }
   .mock-step { text-align: left; }
   .mock-toolbar { align-items: flex-start; }
 }
+
+/* Listening practice */
+.listen-evidence { padding: 1px 3px; border-radius: 4px; }
+.listen-evidence.ok { background: #d1f2dc; }
+.listen-evidence.bad { background: #ffe1b3; }
+.listen-evidence sup { font-weight: 700; margin-right: 2px; color: #3b3b98; }

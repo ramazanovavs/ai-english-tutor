@@ -51,6 +51,7 @@
           <button class="menu-btn" data-page="vocabulary">🔤 Vocabulary</button>
           <button class="menu-btn" data-page="writing">✍️ Writing Coach</button>
           <button class="menu-btn" data-page="speaking">🎙 Speaking</button>
+          <button class="menu-btn" data-page="listening">🎧 Listening</button>
           <button class="menu-btn" data-page="test">📝 Mini Test</button>
           <button class="menu-btn" data-page="progress">📊 Progress</button>
           <div class="small text-secondary px-2 pt-3 pb-1 fw-semibold">IELTS PREPARATION</div>
@@ -142,6 +143,37 @@
           </div>
           <div class="small text-secondary mt-2">🔊 Tutor audio uses an AI-generated voice.</div>
           <div id="speakingResult" class="result mt-4"></div>
+        </div>
+
+        <div id="page-listening" class="page d-none">
+          <h2>Listening Practice</h2>
+          <p class="text-secondary">Listen to a recording made for your level and answer 10 questions. You can play the recording up to 3 times before checking. The transcript opens after checking.</p>
+          <div class="row g-2">
+            <div class="col-md-2">
+              <label class="form-label small text-secondary mb-1">Level</label>
+              <select id="listeningLevel" class="form-select">
+                <option>A1</option><option>A2</option><option selected>B1</option><option>B2</option><option>C1</option><option>C2</option>
+              </select>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small text-secondary mb-1">Format</label>
+              <select id="listeningFormat" class="form-select">
+                <option value="dialogue">Dialogue (2 speakers)</option>
+                <option value="monologue">Monologue</option>
+                <option value="announcement">Announcement</option>
+              </select>
+            </div>
+            <div class="col-md-5">
+              <label class="form-label small text-secondary mb-1">Topic</label>
+              <input id="listeningTopic" class="form-control" maxlength="100" placeholder="e.g. booking a hotel room (optional)">
+            </div>
+            <div class="col-md-2 d-grid align-items-end">
+              <button id="listeningGenerateBtn" class="btn btn-primary mt-md-4" onclick="generateListening()">Generate</button>
+            </div>
+          </div>
+          <div id="listeningLevelHint" class="small text-secondary mt-2"></div>
+          <div id="listeningArea" class="mt-4"></div>
+          <div id="listeningAdmin" class="mt-4"></div>
         </div>
 
         <div id="page-test" class="page d-none">

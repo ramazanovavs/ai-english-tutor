@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     supabase_anon_key: str
     supabase_service_role_key: str
 
+    # Comma-separated emails allowed to use admin tools (e.g. filling the Listening backup bank).
+    admin_emails: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
