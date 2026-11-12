@@ -29,6 +29,7 @@ from app.services import ielts_exam, ielts_speaking, ielts_pronunciation, ielts_
 from app.services.ielts_scoring import criteria_band as ielts_criteria_band
 import threading
 from app.agents import ielts_coach
+from app.agents.ielts_rubrics import language_rule
 from app.agents.ielts_agent import (
     generate_writing_prompt as ielts_generate_writing_prompt,
     assess_writing as ielts_assess_writing,
@@ -209,7 +210,7 @@ def chat_stream(payload: ChatPayload, user=Depends(require_user)):
 def grammar(payload: TextPayload, user=Depends(require_user)):
     context = get_student_context(user["id"])
     level = context.get("profile", {}).get("cefr_level") or "not assessed"
-    result = grammar_analyze(payload.text, level)
+    result = grammar_analyze(payload.text, level, _feedback_lang(user["id"]))
     review.save_errors(user["id"], result.get("errors"), payload.text, "grammar")  # -> "My mistakes"
     score = int(result.get("score", 0))
     estimated_level = result.get("estimated_level")
@@ -244,7 +245,7 @@ def _clean_score(value) -> int:
 @router.post("/writing")
 def writing(payload: WritingPayload, user=Depends(require_user)):
     try:
-        result = writing_analyze(payload.text, payload.purpose)
+        result = writing_analyze(payload.text, payload.purpose, _feedback_lang(user["id"]))
     except Exception as exc:
         logger.exception("Writing analysis failed")
         raise HTTPException(status_code=502, detail=f"AI review failed: {exc}")
@@ -289,7 +290,7 @@ def writing(payload: WritingPayload, user=Depends(require_user)):
 @router.post("/vocabulary")
 def vocabulary(payload: VocabularyPayload, user=Depends(require_user)):
     ensure_profile(user["id"], user.get("email"))
-    result = create_set(payload.topic, payload.level)
+    result = create_set(payload.topic, payload.level, _feedback_lang(user["id"]))
 
     record_activity(
         user["id"],
@@ -310,6 +311,7 @@ def vocabulary(payload: VocabularyPayload, user=Depends(require_user)):
                 "word": word,
                 "part_of_speech": item.get("part_of_speech"),
                 "definition": item.get("definition"),
+                "translation": item.get("translation"),
                 "example_sentence": item.get("example"),
                 "collocation": item.get("collocation"),
                 "topic": payload.topic,
@@ -328,7 +330,7 @@ def vocabulary_practice(payload: VocabularyPracticePayload, user=Depends(require
     if len(payload.items) < 4:
         raise HTTPException(status_code=400, detail="Generate a vocabulary set first.")
 
-    result = create_practice(payload.topic, payload.level, payload.items)
+    result = create_practice(payload.topic, payload.level, payload.items, _feedback_lang(user["id"]))
     questions = result.get("questions") or []
     if len(questions) != 10:
         raise HTTPException(status_code=502, detail="The AI did not generate a complete 10-question practice set.")
@@ -756,7 +758,7 @@ def listening_bank_fill(user=Depends(require_user)):
 
 @router.post("/test/generate")
 def test_generate(payload: TestPayload, user=Depends(require_user)):
-    return generate_test(payload.level, payload.focus)
+    return generate_test(payload.level, payload.focus, _feedback_lang(user["id"]))
 
 
 @router.post("/test/submit")
@@ -894,7 +896,22 @@ def test_submit(payload: TestSubmission, user=Depends(require_user)):
 
 @router.post("/speaking")
 def speaking(payload: SpeakingPayload, user=Depends(require_user)):
-    # Transcript-only speaking feedback. Pronunciation remains intentionally unscored.
+    return _speaking_feedback(user, payload.text, payload.scenario, None)
+
+
+@router.post("/speaking/full")
+async def speaking_full(text: str = Form(...), scenario: str = Form(default="general conversation"),
+                        audio: UploadFile | None = File(default=None), user=Depends(require_user)):
+    """Transcript feedback + pronunciation assessed from the recording (when there is one)."""
+    data = await audio.read() if audio is not None else None
+    if data and len(data) > 12 * 1024 * 1024:
+        data = None
+    from starlette.concurrency import run_in_threadpool
+    return await run_in_threadpool(_speaking_feedback, user, text[:6000], scenario[:100], data)
+
+
+def _speaking_feedback(user: dict, text: str, scenario: str, audio: bytes | None) -> dict:
+    lang = _feedback_lang(user["id"])
     instructions = """
 You are an English speaking-practice coach evaluating a TRANSCRIPT only.
 Return JSON with exactly:
@@ -913,10 +930,10 @@ practice_score must be the rounded average of fluency_coherence, lexical_resourc
 and grammar_accuracy. Do not score pronunciation or claim to have heard acoustic features.
 estimated_level must be based on complexity/control visible in the transcript, not directly
 mapped from practice_score.
-"""
+""" + language_rule(lang) + " This applies to positive_point, correction explanations, suggestion and disclaimer."
     result = ask_json(
         instructions,
-        f"Scenario: {payload.scenario}\nTranscript:\n{payload.text}",
+        f"Scenario: {scenario}\nTranscript:\n{text}",
     )
 
     component_scores = [
@@ -924,27 +941,41 @@ mapped from practice_score.
         int(result.get("lexical_resource", 0)),
         int(result.get("grammar_accuracy", 0)),
     ]
-    practice_score = round(sum(component_scores) / 3)
+    pron_score = None
+    if audio:
+        try:
+            pron = ielts_pronunciation.assess([audio], text, lang)
+        except Exception:
+            logger.exception("Pronunciation assessment failed")
+            pron = None
+        if pron:
+            pron_score = round(float(pron["pronunciation"]) / 9 * 100)
+            result["pronunciation_score"] = pron_score
+            result["pronunciation_feedback"] = pron
+            component_scores.append(pron_score)
+            result["disclaimer"] = ("Practice estimate. Pronunciation is assessed from your recording by an AI model; "
+                                    "the other scores come from the transcript.")
+    practice_score = round(sum(component_scores) / len(component_scores))
     result["practice_score"] = practice_score
     estimated_level = result.get("estimated_level")
 
     admin_db().table("speaking_attempts").insert({
         "user_id": user["id"],
-        "scenario": payload.scenario,
-        "transcript": payload.text,
+        "scenario": scenario,
+        "transcript": text,
         "score": practice_score,
         "estimated_level": estimated_level,
         "fluency_score": component_scores[0],
         "vocabulary_score": component_scores[1],
         "grammar_score": component_scores[2],
-        "pronunciation_score": None,
+        "pronunciation_score": pron_score,
         "feedback": result,
     }).execute()
 
     record_activity(
         user["id"],
         "speaking",
-        payload.scenario,
+        scenario,
         practice_score,
         result,
         tested_level=estimated_level,
@@ -1149,6 +1180,7 @@ class IELTSImprovePayload(BaseModel):
 class IELTSVocabularyAddPayload(BaseModel):
     items: list[dict] = Field(default_factory=list, max_length=20)
     level: str | None = None
+    topic: str = Field(default="IELTS feedback", max_length=100)
 
 
 @router.post("/ielts/improve")
@@ -1176,7 +1208,7 @@ def ielts_vocabulary_add(payload: IELTSVocabularyAddPayload, user=Depends(requir
             "user_id": user["id"], "word": word,
             "part_of_speech": item.get("part_of_speech"), "definition": item.get("definition"),
             "example_sentence": item.get("example"), "collocation": item.get("collocation"),
-            "topic": "IELTS feedback", "cefr_level": level, "status": "learning",
+            "topic": payload.topic, "cefr_level": level, "status": "learning",
         }, on_conflict="user_id,word").execute()
         added.append(word)
     return {"added": added}
@@ -2442,3 +2474,76 @@ def level_check_answers(payload: CheckAnswersPayload, user=Depends(require_user)
 @router.post("/level-check/writing")
 def level_check_writing(payload: CheckWritingPayload, user=Depends(require_user)):
     return _progress_call(progress.submit_check_writing, user["id"], payload.text)
+
+
+# ========================= READING (General English) =========================
+
+class ReadingGeneratePayload(BaseModel):
+    level: Literal["A1", "A2", "B1", "B2", "C1", "C2"] = "B1"
+    genre: str = Field(default="article", max_length=30)
+    topic: str = Field(default="", max_length=100)
+
+
+class ReadingSubmitPayload(BaseModel):
+    test_id: str
+    answers: dict[str, str] = Field(default_factory=dict)
+
+
+def _load_reading(test_id: str, user_id: str) -> dict | None:
+    rows = admin_db().table("tests").select("questions").eq("id", test_id).eq("user_id", user_id) \
+        .eq("focus", "reading").limit(1).execute().data
+    return rows[0]["questions"] if rows else None
+
+
+@router.post("/reading/generate")
+def reading_generate(payload: ReadingGeneratePayload, user=Depends(require_user)):
+    ensure_profile(user["id"], user.get("email"))
+    from app.agents import reading_agent
+    from app.agents.ielts_verify import verify
+    try:
+        content = reading_agent.generate(payload.level, payload.genre, payload.topic.strip(), _feedback_lang(user["id"]))
+        content = verify(content, "passage", "passage")      # an independent check of the answer key
+    except Exception:
+        logger.exception("Reading generation failed")
+        raise HTTPException(status_code=503, detail=f"{AI_DOWN} Try again in a few minutes.")
+    content["level"] = payload.level
+    row = admin_db().table("tests").insert({"user_id": user["id"], "title": content.get("title") or "Reading",
+                                            "test_type": "reading_practice", "focus": "reading",
+                                            "level": payload.level, "questions": content}).execute()
+    return {"test_id": row.data[0]["id"], "title": content.get("title"), "passage": content.get("passage"),
+            "level": payload.level,
+            "questions": [{k: q.get(k) for k in ("id", "type", "question", "options", "instruction")}
+                          for q in content["questions"]]}
+
+
+@router.post("/reading/submit")
+def reading_submit(payload: ReadingSubmitPayload, user=Depends(require_user)):
+    content = _load_reading(payload.test_id, user["id"])
+    if not content:
+        raise HTTPException(status_code=404, detail="Reading practice not found.")
+    key = content.get("answer_key") or {}
+    explanations = content.get("explanations") or {}
+    details, correct = [], 0
+    for q in content["questions"]:
+        qid = str(q.get("id"))
+        accepted = key.get(qid) if isinstance(key.get(qid), list) else [key.get(qid)]
+        accepted = [str(a) for a in accepted if a]
+        given = str(payload.answers.get(qid, "")).strip()
+        ok = ielts_exam.is_correct(given, accepted, q.get("instruction"), q.get("options"))
+        correct += int(ok)
+        details.append({"id": q.get("id"), "type": q.get("type"), "answer": given, "correct": ok,
+                        "expected": accepted[0] if accepted else "", "explanation": explanations.get(qid, "")})
+    total = len(details)
+    score = round(correct / max(total, 1) * 100)
+    level = content.get("level")
+    try:
+        admin_db().table("reading_attempts").insert({
+            "user_id": user["id"], "title": content.get("title"), "source_text": content.get("passage"),
+            "level": level, "score": score, "questions": content["questions"], "answers": details}).execute()
+    except Exception:
+        logger.exception("Could not save reading attempt")
+    record_activity(user["id"], "reading", content.get("title") or "Reading practice", score,
+                    {"level": level, "correct": correct, "total": total, "test_id": payload.test_id},
+                    tested_level=level, evidence_source="explicit_cefr_reading_practice")
+    return {"score": score, "correct": correct, "total": total, "level": level, "details": details,
+            "glossary": content.get("glossary") or []}

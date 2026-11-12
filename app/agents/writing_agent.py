@@ -19,8 +19,10 @@ Preserve the learner's meaning in revised_sample.
 """
 
 
-def analyze(text: str, purpose: str = "general") -> dict:
+def analyze(text: str, purpose: str = "general", language: str = "en") -> dict:
+    from app.agents.ielts_rubrics import language_rule
     return ask_json(
-        INSTRUCTIONS,
+        INSTRUCTIONS + "\n" + language_rule(language) + " This applies to strengths, issues, suggestions, "
+        "explanations and next_task; revised_sample and corrections stay in English.",
         f"Writing purpose: {purpose}\nLearner text:\n{text}",
     )

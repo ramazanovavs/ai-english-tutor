@@ -236,7 +236,7 @@ def _prepare_check(user_id: str, check_id: str, target: str) -> None:
     items = rm.items_for(target)
     grammar = "; ".join(it["action"]["focus"].split(": ", 1)[-1] for it in items if it["skill"] == "grammar")
     vocab = "; ".join(it["action"]["topic"] for it in items if it["skill"] == "vocabulary")
-    genre = next((it["action"]["focus"].split(": ", 1)[-1] for it in items if it["skill"] == "reading"), "an article")
+    genre = next((it["action"].get("topic") for it in items if it["skill"] == "reading"), "an article")
     try:
         content = None
         for _ in range(2):

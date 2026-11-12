@@ -62,8 +62,12 @@ def _v(sub, topic, en, ru, kk):
     return _i(sub, "vocabulary", 1, en, ru, kk, {"module": "vocabulary", "topic": topic})
 
 
+READING_GENRE = {"A1.1": "notice", "A1.2": "email", "A2.1": "email", "A2.2": "article", "B1.1": "article",
+                 "B1.2": "blog", "B2.1": "report", "B2.2": "story", "C1.1": "article", "C1.2": "report", "C2": "article"}
+
+
 def _r(sub, genre, en, ru, kk):
-    return _i(sub, "reading", 1, en, ru, kk, {"module": "test", "focus": f"reading: {genre}"})
+    return _i(sub, "reading", 1, en, ru, kk, {"module": "reading", "genre": READING_GENRE[sub], "topic": genre})
 
 
 def _l(sub, fmt, topic, en, ru, kk):

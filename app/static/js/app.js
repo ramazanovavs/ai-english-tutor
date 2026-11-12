@@ -6,6 +6,7 @@ let currentVocabSet = null;
 let currentVocabPractice = null;
 let mediaRecorder = null;
 let mediaChunks = [];
+let speakingAudioBlob = null;   // last Speaking recording, sent for the pronunciation assessment
 let recordingStream = null;
 let recordingStopTimer = null;
 
@@ -134,7 +135,7 @@ function renderDashboard() {
   );
 
   document.getElementById("navLevel").textContent =
-    profile.cefr_level || "Not assessed";
+    currentProfile.roadmap?.current || profile.cefr_level || T("not_assessed");
   document.getElementById("navEmail").textContent =
     currentProfile.email || currentSession?.user?.email || "";
   document.getElementById("navAdmin").classList.toggle("d-none", !currentProfile.is_admin);
@@ -150,7 +151,7 @@ function renderDashboard() {
       s.score !== null &&
       s.score !== undefined;
 
-    const scoreText = isAssessed ? `${esc(s.score)}%` : "Not assessed";
+    const scoreText = isAssessed ? `${esc(s.score)}%` : esc(T("not_assessed"));
     const levelText = isAssessed && s.level ? esc(s.level) : "—";
     const masteryText = isAssessed && s.mastery_status
       ? ` · ${esc(masteryLabel(s))}`
@@ -159,11 +160,11 @@ function renderDashboard() {
     return `
       <div class="col-md-6 col-xl-4">
         <div class="card-soft h-100">
-          <div class="text-secondary small">${esc(s.skill)}</div>
+          <div class="text-secondary small">${esc(rmText(RM_SKILL_NAMES[s.category]) || s.skill)}</div>
           <div class="skill-score">${scoreText}</div>
           <div class="d-flex justify-content-between align-items-center gap-2">
             <span class="badge text-bg-light">${levelText}${masteryText}</span>
-            <span class="small text-secondary">${esc(s.attempts || 0)} attempts</span>
+            <span class="small text-secondary">${esc(T("attempts", {n: s.attempts || 0}))}</span>
           </div>
           ${s.last_tested_level && s.last_tested_level !== s.level
             ? `<div class="small text-secondary mt-2">Latest evidence: ${esc(s.last_tested_level)} · ${esc(s.last_test_score)}%</div>`
@@ -395,17 +396,17 @@ async function sendChat() {
 async function checkGrammar() {
   const text = document.getElementById("grammarText").value.trim();
   if (!text) return;
-  loading("grammarResult", "Analyzing grammar…");
+  loading("grammarResult", T("g_loading"));
   try {
     const d = await api("/api/grammar", {method:"POST", body:JSON.stringify({text})});
     document.getElementById("grammarResult").innerHTML = `
       <h4>${esc(d.score)}% · ${esc(d.topic)}</h4>
       <p>${esc(d.summary)}</p>
-      <div class="alert alert-light"><strong>Corrected:</strong> ${esc(d.corrected_text)}</div>
-      <h6>Errors</h6>
-      ${(d.errors || []).map(x => `<div class="mb-2"><code>${esc(x.original)}</code> → <strong>${esc(x.correction)}</strong><br><span class="small">${esc(x.rule)}: ${esc(x.explanation)}</span></div>`).join("") || "<p>No major errors.</p>"}
+      <div class="alert alert-light"><strong>${esc(T("g_corrected"))}:</strong> ${esc(d.corrected_text)}</div>
+      <h6>${esc(T("errors"))}</h6>
+      ${(d.errors || []).map(x => `<div class="mb-2"><code>${esc(x.original)}</code> → <strong>${esc(x.correction)}</strong><br><span class="small">${esc(x.rule)}: ${esc(x.explanation)}</span></div>`).join("") || `<p>${esc(T("g_noerrors"))}</p>`}
       ${(d.errors || []).length ? `<div class="small text-secondary">🔁 ${esc(T("saved_to_mistakes"))}</div>` : ""}
-      <h6 class="mt-3">Mini-practice</h6>
+      <h6 class="mt-3">${esc(T("g_practice"))}</h6>
       <ol>${(d.practice || []).map(x => `<li>${esc(x)}</li>`).join("")}</ol>`;
     await loadProfile();
   } catch(e) { document.getElementById("grammarResult").textContent = e.message; }
@@ -611,17 +612,17 @@ async function checkWriting() {
   const text = document.getElementById("writingText").value.trim();
   const purpose = document.getElementById("writingPurpose").value;
   if (!text) return;
-  loading("writingResult", "Reviewing writing…");
+  loading("writingResult", T("w_loading"));
   try {
     const d = await api("/api/writing", {method:"POST", body:JSON.stringify({text, purpose})});
     roadmapReport("writing", d.score, d.estimated_level);
     document.getElementById("writingResult").innerHTML = `
-      <h4>${esc(d.score)}% · approx. ${esc(d.estimated_level)}</h4>
-      <h6>Strengths</h6><ul>${(d.strengths || []).map(x=>`<li>${esc(x)}</li>`).join("")}</ul>
-      <h6>Improve</h6>${(d.improvements || []).map(x=>`<div class="mb-2"><strong>${esc(x.category)}:</strong> ${esc(x.issue)}<br><span class="text-secondary">${esc(x.suggestion)}</span></div>`).join("")}
-      ${(d.errors || []).length ? `<h6 class="mt-3">Errors</h6>${d.errors.map(x => `<div class="mb-1"><code>${esc(x.original)}</code> → <strong>${esc(x.correction)}</strong> <span class="small text-secondary">${esc(x.rule || "")}${x.explanation ? " — " + esc(x.explanation) : ""}</span></div>`).join("")}<div class="small text-secondary">🔁 ${esc(T("saved_to_mistakes"))}</div>` : ""}
-      <h6 class="mt-3">Revised sample</h6><div class="alert alert-light">${esc(d.revised_sample)}</div>
-      <strong>Next task:</strong> ${esc(d.next_task)}`;
+      <h4>${esc(d.score)}% · ${esc(T("approx"))} ${esc(d.estimated_level)}</h4>
+      <h6>${esc(T("strengths"))}</h6><ul>${(d.strengths || []).map(x=>`<li>${esc(x)}</li>`).join("")}</ul>
+      <h6>${esc(T("improve"))}</h6>${(d.improvements || []).map(x=>`<div class="mb-2"><strong>${esc(x.category)}:</strong> ${esc(x.issue)}<br><span class="text-secondary">${esc(x.suggestion)}</span></div>`).join("")}
+      ${(d.errors || []).length ? `<h6 class="mt-3">${esc(T("errors"))}</h6>${d.errors.map(x => `<div class="mb-1"><code>${esc(x.original)}</code> → <strong>${esc(x.correction)}</strong> <span class="small text-secondary">${esc(x.rule || "")}${x.explanation ? " — " + esc(x.explanation) : ""}</span></div>`).join("")}<div class="small text-secondary">🔁 ${esc(T("saved_to_mistakes"))}</div>` : ""}
+      <h6 class="mt-3">${esc(T("w_revised"))}</h6><div class="alert alert-light">${esc(d.revised_sample)}</div>
+      <strong>${esc(T("next_task"))}:</strong> ${esc(d.next_task)}`;
     await loadProfile();
   } catch(e) { document.getElementById("writingResult").textContent = e.message; }
 }
@@ -645,6 +646,7 @@ async function startSpeech() {
     const options = MediaRecorder.isTypeSupported(preferred) ? {mimeType: preferred} : {};
     mediaRecorder = new MediaRecorder(recordingStream, options);
     mediaChunks = [];
+    speakingAudioBlob = null;
 
     mediaRecorder.ondataavailable = event => {
       if (event.data && event.data.size > 0) mediaChunks.push(event.data);
@@ -659,6 +661,7 @@ async function startSpeech() {
       try {
         const mimeType = mediaRecorder.mimeType || "audio/webm";
         const blob = new Blob(mediaChunks, {type: mimeType});
+        speakingAudioBlob = blob;   // kept for the pronunciation assessment
         const ext = mimeType.includes("ogg") ? "ogg" : mimeType.includes("mp4") ? "m4a" : "webm";
         const form = new FormData();
         form.append("audio", blob, `recording.${ext}`);
@@ -669,7 +672,7 @@ async function startSpeech() {
         alert(e.message);
       } finally {
         btn.disabled = false;
-        btn.textContent = "🎙 Record answer";
+        btn.textContent = T("s_rec");
         mediaRecorder = null;
         recordingStream = null;
         mediaChunks = [];
@@ -691,31 +694,34 @@ async function checkSpeaking() {
   const text = document.getElementById("speakingText").value.trim();
   const scenario = document.getElementById("scenario").value;
   if (!text) return;
-  loading("speakingResult", "Preparing speaking feedback…");
+  loading("speakingResult", T("s_loading"));
   try {
-    const d = await api("/api/speaking", {
-      method:"POST",
-      body:JSON.stringify({text, scenario})
-    });
+    const form = new FormData();
+    form.append("text", text);
+    form.append("scenario", scenario);
+    if (speakingAudioBlob) form.append("audio", speakingAudioBlob, "answer.webm");
+    const d = await apiForm("/api/speaking/full", form);
     roadmapReport("speaking", d.practice_score, d.estimated_level);
 
     document.getElementById("speakingResult").innerHTML = `
       <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
-        <h4>${esc(d.practice_score)}% · approx. ${esc(d.estimated_level || "—")}</h4>
-        <span class="badge text-bg-warning">Pronunciation not assessed</span>
+        <h4>${esc(d.practice_score)}% · ${esc(T("approx"))} ${esc(d.estimated_level || "—")}</h4>
+        <span class="badge ${d.pronunciation_score != null ? "text-bg-success" : "text-bg-warning"}">${esc(d.pronunciation_score != null ? T("s_pron_ok") : T("s_pron_no"))}</span>
       </div>
       <div class="row g-2 my-3">
-        <div class="col-md-4"><div class="card-soft text-center"><div class="small text-secondary">Fluency & coherence</div><div class="skill-score">${esc(d.fluency_coherence)}%</div></div></div>
-        <div class="col-md-4"><div class="card-soft text-center"><div class="small text-secondary">Vocabulary</div><div class="skill-score">${esc(d.lexical_resource)}%</div></div></div>
-        <div class="col-md-4"><div class="card-soft text-center"><div class="small text-secondary">Grammar</div><div class="skill-score">${esc(d.grammar_accuracy)}%</div></div></div>
+        <div class="col-md-3"><div class="card-soft text-center"><div class="small text-secondary">${esc(T("s_fluency"))}</div><div class="skill-score">${esc(d.fluency_coherence)}%</div></div></div>
+        <div class="col-md-3"><div class="card-soft text-center"><div class="small text-secondary">${esc(T("s_vocab"))}</div><div class="skill-score">${esc(d.lexical_resource)}%</div></div></div>
+        <div class="col-md-3"><div class="card-soft text-center"><div class="small text-secondary">${esc(T("s_grammar"))}</div><div class="skill-score">${esc(d.grammar_accuracy)}%</div></div></div>
+        <div class="col-md-3"><div class="card-soft text-center"><div class="small text-secondary">${esc(T("s_pron"))}</div><div class="skill-score">${d.pronunciation_score != null ? esc(d.pronunciation_score) + "%" : "—"}</div></div></div>
       </div>
-      <p><strong>Positive point:</strong> ${esc(d.positive_point || "")}</p>
-      <p><strong>Correction:</strong> ${esc(d.correction || "")}</p>
-      <p><strong>Suggestion:</strong> ${esc(d.suggestion || "")}</p>
-      <p><strong>Follow-up:</strong> ${esc(d.follow_up_question || "")}</p>
-      <p class="small text-secondary">${esc(d.disclaimer || "Transcript-only practice score; pronunciation is not assessed.")}</p>
+      <p><strong>${esc(T("s_positive"))}:</strong> ${esc(d.positive_point || "")}</p>
+      <p><strong>${esc(T("s_correction"))}:</strong> ${esc(d.correction || "")}</p>
+      <p><strong>${esc(T("s_suggestion"))}:</strong> ${esc(d.suggestion || "")}</p>
+      <p><strong>${esc(T("s_followup"))}:</strong> ${esc(d.follow_up_question || "")}</p>
+      ${pronunciationFeedbackHTML(d.pronunciation_feedback)}
+      <p class="small text-secondary">${esc(d.disclaimer || "")}</p>
       <button class="btn btn-sm btn-outline-primary mt-2"
-        onclick="speakText(this.parentElement.innerText, this)">🔊 Listen to feedback</button>`;
+        onclick="speakText(this.parentElement.innerText, this)">🔊 ${esc(T("s_listen"))}</button>`;
 
     await loadProfile();
   } catch(e) {
@@ -2964,6 +2970,9 @@ function T(key, vars = {}) {
 }
 
 function applyUiLang() {
+  document.querySelectorAll("[data-i18n]").forEach(el => { if (RM_T[el.dataset.i18n]) el.textContent = T(el.dataset.i18n); });
+  document.querySelectorAll("[data-i18n-ph]").forEach(el => { if (RM_T[el.dataset.i18nPh]) el.placeholder = T(el.dataset.i18nPh); });
+  document.documentElement.lang = uiLang();
   const sel = document.getElementById("uiLang");
   if (sel) sel.value = uiLang();
   const menu = document.getElementById("menuRoadmap");
@@ -2980,6 +2989,7 @@ async function setUiLang(lang) {
   if (currentProfile?.profile) currentProfile.profile.preferred_explanation_language = lang;
   applyUiLang();
   try { await api("/api/profile/language", {method: "POST", body: JSON.stringify({language: lang})}); } catch (e) { rmToast(e.message); }
+  if (currentProfile) renderDashboard();
   renderRoadmapDashCard();
   renderToday();
   if (!document.getElementById("page-roadmap").classList.contains("d-none")) renderRoadmapPage();
@@ -3326,7 +3336,7 @@ function placementResultsHTML() {
   return `<details class="card-soft mb-3"><summary class="fw-semibold">${esc(T("test_results"))}</summary><div class="mt-2">${rows}</div></details>`;
 }
 
-const RM_MODULE_PAGE = {test: "test", vocabulary: "vocabulary", listening: "listening", writing: "writing", speaking: "speaking"};
+const RM_MODULE_PAGE = {test: "test", vocabulary: "vocabulary", listening: "listening", writing: "writing", speaking: "speaking", reading: "reading"};
 
 function rmSelect(id, value, label) {
   const sel = document.getElementById(id);
@@ -3362,6 +3372,11 @@ function launchRoadmapItem(itemId) {
     document.getElementById("writingText").placeholder = a.task;
   } else if (a.module === "speaking") {
     rmSelect("scenario", a.scenario);
+  } else if (a.module === "reading") {
+    rmSelect("readingLevel", level);
+    rmSelect("readingGenre", a.genre);
+    document.getElementById("readingTopic").value = a.topic || "";
+    generateReading();
   }
 }
 
@@ -3674,3 +3689,177 @@ async function submitLevelCheckWriting() {
     renderLevelCheck();
   } catch (e) { rmToast(e.message); }
 }
+
+// ========================= Interface language (ru / kk / en) and Reading =========================
+const RM_SKILL_NAMES = {
+  grammar: {ru: "Грамматика", kk: "Грамматика", en: "Grammar"}, vocabulary: {ru: "Лексика", kk: "Лексика", en: "Vocabulary"},
+  reading: {ru: "Чтение", kk: "Оқылым", en: "Reading"}, listening: {ru: "Аудирование", kk: "Тыңдалым", en: "Listening"},
+  writing: {ru: "Письмо", kk: "Жазылым", en: "Writing"}, speaking: {ru: "Говорение", kk: "Айтылым", en: "Speaking"},
+};
+Object.assign(RM_T, {
+  signout: {ru: "Выйти", kk: "Шығу", en: "Sign out"},
+  m_dashboard: {ru: "🏠 Главная", kk: "🏠 Басты бет", en: "🏠 Dashboard"},
+  m_tutor: {ru: "💬 ИИ-репетитор", kk: "💬 ЖИ-репетитор", en: "💬 AI Tutor"},
+  m_grammar: {ru: "🧠 Грамматика", kk: "🧠 Грамматика", en: "🧠 Grammar Coach"},
+  m_vocab: {ru: "🔤 Лексика", kk: "🔤 Сөздік", en: "🔤 Vocabulary"},
+  m_writing: {ru: "✍️ Письмо", kk: "✍️ Жазылым", en: "✍️ Writing Coach"},
+  m_speaking: {ru: "🎙 Говорение", kk: "🎙 Айтылым", en: "🎙 Speaking"},
+  m_listening: {ru: "🎧 Аудирование", kk: "🎧 Тыңдалым", en: "🎧 Listening"},
+  m_reading: {ru: "📖 Чтение", kk: "📖 Оқылым", en: "📖 Reading"},
+  m_test: {ru: "📝 Мини-тест", kk: "📝 Шағын тест", en: "📝 Mini Test"},
+  m_progress: {ru: "📊 Прогресс", kk: "📊 Прогресс", en: "📊 Progress"},
+  m_ielts: {ru: "ПОДГОТОВКА К IELTS", kk: "IELTS-КЕ ДАЙЫНДЫҚ", en: "IELTS PREPARATION"},
+  d_eyebrow: {ru: "ЛИЧНОЕ ПРОСТРАНСТВО ОБУЧЕНИЯ", kk: "ЖЕКЕ ОҚУ КЕҢІСТІГІ", en: "PERSONAL LEARNING SPACE"},
+  d_welcome: {ru: "С возвращением 👋", kk: "Қайта қош келдіңіз 👋", en: "Welcome back 👋"},
+  d_sub: {ru: "Занимайтесь, получайте разбор — система подстраивается под вас.", kk: "Жаттығыңыз, талдау алыңыз — жүйе сізге бейімделеді.", en: "Practice, get feedback, and let your student model adapt."},
+  d_start: {ru: "Начать занятие", kk: "Сабақты бастау", en: "Start practice"},
+  d_reco: {ru: "Рекомендация ИИ", kk: "ЖИ ұсынысы", en: "AI recommendation"},
+  t_title: {ru: "ИИ-репетитор", kk: "ЖИ-репетитор", en: "AI Tutor"},
+  t_sub: {ru: "Общайтесь по-английски свободно — репетитор учитывает ваш уровень и объясняет на выбранном языке.", kk: "Ағылшынша еркін сөйлесіңіз — репетитор деңгейіңізді ескеріп, таңдалған тілде түсіндіреді.", en: "Chat naturally. The tutor uses your current learning profile."},
+  t_ph: {ru: "Пишите по-английски…", kk: "Ағылшынша жазыңыз…", en: "Write in English…"},
+  send: {ru: "Отправить", kk: "Жіберу", en: "Send"},
+  g_title: {ru: "Грамматика", kk: "Грамматика", en: "Grammar Coach"},
+  g_sub: {ru: "Напишите одно или несколько предложений по-английски — тренер исправит, объяснит и даст упражнения.", kk: "Ағылшынша бір не бірнеше сөйлем жазыңыз — жаттықтырушы түзетіп, түсіндіріп, жаттығу береді.", en: "Write one or more English sentences. The coach corrects, explains and creates practice."},
+  g_btn: {ru: "Проверить грамматику", kk: "Грамматиканы тексеру", en: "Analyze grammar"},
+  g_loading: {ru: "Проверяем грамматику…", kk: "Грамматика тексерілуде…", en: "Analyzing grammar…"},
+  g_corrected: {ru: "Исправленный текст", kk: "Түзетілген мәтін", en: "Corrected"},
+  g_noerrors: {ru: "Серьёзных ошибок нет.", kk: "Елеулі қате жоқ.", en: "No major errors."},
+  g_practice: {ru: "Мини-упражнения", kk: "Шағын жаттығулар", en: "Mini-practice"},
+  errors: {ru: "Ошибки", kk: "Қателер", en: "Errors"},
+  v_title: {ru: "Тренажёр лексики", kk: "Сөздік жаттықтырғыш", en: "Vocabulary Trainer"},
+  v_ph: {ru: "Тема, например: путешествия, academic presentations", kk: "Тақырып, мысалы: саяхат, academic presentations", en: "Topic, e.g. academic presentations"},
+  generate: {ru: "Создать", kk: "Құру", en: "Generate"},
+  w_title: {ru: "Письмо", kk: "Жазылым", en: "Writing Coach"},
+  w_ph: {ru: "Вставьте или напишите текст по-английски…", kk: "Ағылшынша мәтінді қойыңыз немесе жазыңыз…", en: "Paste or write your text…"},
+  w_btn: {ru: "Проверить текст", kk: "Мәтінді тексеру", en: "Review writing"},
+  w_loading: {ru: "Проверяем текст…", kk: "Мәтін тексерілуде…", en: "Reviewing writing…"},
+  w_revised: {ru: "Улучшенный вариант", kk: "Жақсартылған нұсқа", en: "Revised sample"},
+  next_task: {ru: "Следующее задание", kk: "Келесі тапсырма", en: "Next task"},
+  approx: {ru: "примерно", kk: "шамамен", en: "approx."},
+  s_title: {ru: "Говорение", kk: "Айтылым", en: "Speaking Practice"},
+  s_sub: {ru: "Запишите ответ (до 2 минут): речь расшифруется и будет разобрана, а произношение оценивается по самой записи. Можно и напечатать текст — тогда произношение не оценивается.", kk: "Жауабыңызды жазыңыз (2 минутқа дейін): сөзіңіз мәтінге айналып талданады, ал айтылым жазбаның өзі бойынша бағаланады. Мәтінді теруге де болады — онда айтылым бағаланбайды.", en: "Record your answer (up to 2 minutes). The speech is transcribed and analysed, and pronunciation is assessed from the recording. You can also type a text, but then pronunciation is not assessed."},
+  s_ph: {ru: "Здесь появится расшифровка…", kk: "Мұнда транскрипция пайда болады…", en: "Your transcript appears here…"},
+  s_rec: {ru: "🎙 Записать ответ", kk: "🎙 Жауапты жазу", en: "🎙 Record answer"},
+  s_btn: {ru: "Получить разбор", kk: "Талдау алу", en: "Get feedback"},
+  s_voice: {ru: "🔊 Голос репетитора создан ИИ.", kk: "🔊 Репетитор дауысын ЖИ жасаған.", en: "🔊 Tutor audio uses an AI-generated voice."},
+  s_loading: {ru: "Готовим разбор (с произношением — до минуты)…", kk: "Талдау дайындалуда (айтылыммен — бір минутқа дейін)…", en: "Preparing feedback (with pronunciation — up to a minute)…"},
+  s_pron_ok: {ru: "Произношение оценено по записи", kk: "Айтылым жазба бойынша бағаланды", en: "Pronunciation assessed from the recording"},
+  s_pron_no: {ru: "Произношение не оценено (нет записи)", kk: "Айтылым бағаланбады (жазба жоқ)", en: "Pronunciation not assessed (no recording)"},
+  s_fluency: {ru: "Беглость и связность", kk: "Еркіндік пен байланыс", en: "Fluency & coherence"},
+  s_vocab: {ru: "Лексика", kk: "Лексика", en: "Vocabulary"},
+  s_grammar: {ru: "Грамматика", kk: "Грамматика", en: "Grammar"},
+  s_pron: {ru: "Произношение", kk: "Айтылым", en: "Pronunciation"},
+  s_positive: {ru: "Хорошо получилось", kk: "Жақсы шықты", en: "Positive point"},
+  s_correction: {ru: "Исправление", kk: "Түзету", en: "Correction"},
+  s_suggestion: {ru: "Совет", kk: "Кеңес", en: "Suggestion"},
+  s_followup: {ru: "Следующий вопрос", kk: "Келесі сұрақ", en: "Follow-up"},
+  s_listen: {ru: "Прослушать разбор", kk: "Талдауды тыңдау", en: "Listen to feedback"},
+  l_title: {ru: "Аудирование", kk: "Тыңдалым", en: "Listening Practice"},
+  l_sub: {ru: "Прослушайте запись для вашего уровня и ответьте на 10 вопросов. До проверки запись можно прослушать до 3 раз, после проверки открывается текст записи.", kk: "Деңгейіңізге арналған жазбаны тыңдап, 10 сұраққа жауап беріңіз. Тексергенге дейін жазбаны 3 ретке дейін тыңдауға болады, тексергеннен кейін мәтіні ашылады.", en: "Listen to a recording made for your level and answer 10 questions. You can play the recording up to 3 times before checking. The transcript opens after checking."},
+  level: {ru: "Уровень", kk: "Деңгей", en: "Level"},
+  format: {ru: "Формат", kk: "Формат", en: "Format"},
+  topic: {ru: "Тема", kk: "Тақырып", en: "Topic"},
+  genre: {ru: "Жанр", kk: "Жанр", en: "Genre"},
+  mt_title: {ru: "Мини-тест", kk: "Шағын тест", en: "Adaptive Mini Test"},
+  mt_btn: {ru: "Создать тест", kk: "Тест құру", en: "Generate test"},
+  p_title: {ru: "Прогресс", kk: "Прогресс", en: "Progress"},
+  p_recent: {ru: "Последние занятия", kk: "Соңғы сабақтар", en: "Recent activity"},
+  not_assessed: {ru: "Не оценено", kk: "Бағаланбаған", en: "Not assessed"},
+  attempts: {ru: "попыток: {n}", kk: "әрекет: {n}", en: "{n} attempts"},
+  r_title: {ru: "Чтение", kk: "Оқылым", en: "Reading Practice"},
+  r_sub: {ru: "Текст вашего уровня и 8 вопросов. После проверки видно, где в тексте ответ, и полезные слова, которые можно добавить в свою лексику.", kk: "Деңгейіңізге сай мәтін және 8 сұрақ. Тексергеннен кейін жауаптың мәтіннің қай жерінде екені және сөздігіңізге қосуға болатын пайдалы сөздер көрсетіледі.", en: "A text written for your level with 8 questions. After checking you see where the answer is in the text and useful words you can add to your Vocabulary."},
+  r_ph: {ru: "например, здоровый сон (необязательно)", kk: "мысалы, дұрыс ұйқы (міндетті емес)", en: "e.g. healthy sleep (optional)"},
+  r_loading: {ru: "Пишем текст и вопросы…", kk: "Мәтін мен сұрақтар жазылуда…", en: "Writing the text and questions…"},
+  r_check: {ru: "Проверить ответы", kk: "Жауаптарды тексеру", en: "Check answers"},
+  r_score: {ru: "Результат: {s}% ({c} из {t})", kk: "Нәтиже: {s}% ({t}-тің {c}-і)", en: "Score: {s}% ({c} of {t})"},
+  r_glossary: {ru: "Полезные слова из текста", kk: "Мәтіндегі пайдалы сөздер", en: "Useful words from the text"},
+  r_add_words: {ru: "Добавить в мою лексику", kk: "Менің сөздігіме қосу", en: "Add to my Vocabulary"},
+  r_added: {ru: "Добавлено слов: {n} — они появятся в «Повторении».", kk: "{n} сөз қосылды — олар «Қайталау» бөлімінде шығады.", en: "{n} words added — they will appear in Review."},
+  r_unanswered: {ru: "Не на все вопросы есть ответ. Проверить?", kk: "Барлық сұраққа жауап берілмеді. Тексеру керек пе?", en: "Some questions are not answered. Check anyway?"},
+  your_answer_short: {ru: "Ответ (до 3 слов)", kk: "Жауап (3 сөзге дейін)", en: "Answer (up to 3 words)"},
+});
+
+let currentReading = null;
+
+async function generateReading() {
+  const btn = document.getElementById("readingGenerateBtn");
+  const area = document.getElementById("readingArea");
+  btn.disabled = true;
+  area.innerHTML = `<div class="loader">${esc(T("r_loading"))}</div>`;
+  try {
+    currentReading = await api("/api/reading/generate", {method: "POST", body: JSON.stringify({
+      level: document.getElementById("readingLevel").value, genre: document.getElementById("readingGenre").value,
+      topic: document.getElementById("readingTopic").value.trim()})});
+    renderReading();
+  } catch (e) { area.innerHTML = `<div class="alert alert-warning">${esc(e.message)}</div>`; }
+  finally { btn.disabled = false; }
+}
+
+function renderReading(result = null) {
+  const r = currentReading;
+  const det = Object.fromEntries((result?.details || []).map(d => [String(d.id), d]));
+  const qs = r.questions.map(q => {
+    const d = det[String(q.id)];
+    const input = (q.options || []).length
+      ? q.options.map((o, i) => `<div class="form-check"><input class="form-check-input" type="radio" name="rd${q.id}" id="rd${q.id}_${i}" value="${esc(o)}" ${d ? "disabled" : ""} ${d && d.answer === o ? "checked" : ""}>
+          <label class="form-check-label" for="rd${q.id}_${i}">${esc(o)}</label></div>`).join("")
+      : `<input class="form-control" name="rd${q.id}" placeholder="${esc(T("your_answer_short"))}" value="${esc(d?.answer || "")}" ${d ? "disabled" : ""}>`;
+    const fb = d ? `<div class="small mt-2 ${d.correct ? "text-success" : "text-danger"}">${d.correct ? "✓" : `✗ ${esc(T("correct_answer"))}: <strong>${esc(d.expected)}</strong>`}
+        ${d.explanation ? `<div class="text-secondary">${esc(d.explanation)}</div>` : ""}</div>` : "";
+    return `<div class="card-soft my-2">${q.instruction ? `<div class="small text-secondary mb-1">${esc(q.instruction)}</div>` : ""}
+      <div class="fw-semibold mb-2">${esc(q.id)}. ${esc(q.question)}</div>${input}${fb}</div>`;
+  }).join("");
+  const glossary = result?.glossary?.length ? `<div class="card-soft mt-3"><h5>${esc(T("r_glossary"))}</h5>
+      ${result.glossary.map(g => `<div class="vocab-item"><strong>${esc(g.word)}</strong> <span class="text-secondary">${esc(g.part_of_speech || "")}</span><br>${esc(g.definition || "")}${g.example ? `<br><em>${esc(g.example)}</em>` : ""}</div>`).join("")}
+      <button class="btn btn-sm btn-primary mt-2" onclick="addReadingWords()">${esc(T("r_add_words"))}</button> <span id="readingWordsMsg" class="small text-secondary"></span></div>` : "";
+  document.getElementById("readingArea").innerHTML = `
+    <div class="card-soft mb-3"><div class="d-flex justify-content-between"><h4>${esc(r.title || "")}</h4><span class="badge text-bg-light">${esc(r.level)}</span></div>
+      <div class="reading-passage">${esc(r.passage || "").replace(/\n/g, "<br>")}</div></div>
+    ${result ? `<div class="alert alert-primary">${esc(T("r_score", {s: result.score, c: result.correct, t: result.total}))}</div>` : ""}
+    ${qs}
+    ${result ? glossary : `<button id="readingSubmitBtn" class="btn btn-primary mt-2" onclick="submitReading()">${esc(T("r_check"))}</button>`}`;
+}
+
+async function submitReading() {
+  const answers = {};
+  let empty = 0;
+  currentReading.questions.forEach(q => {
+    const el = document.querySelector(`input[name="rd${q.id}"]:checked`) || document.querySelector(`input[name="rd${q.id}"]:not([type=radio])`);
+    if (el && el.value.trim()) answers[String(q.id)] = el.value.trim(); else empty++;
+  });
+  if (empty && !confirm(T("r_unanswered"))) return;
+  const btn = document.getElementById("readingSubmitBtn");
+  btn.disabled = true;
+  try {
+    const d = await api("/api/reading/submit", {method: "POST", body: JSON.stringify({test_id: currentReading.test_id, answers})});
+    currentReading.result = d;
+    roadmapReport("reading", d.score);
+    renderReading(d);
+    loadProfile();
+  } catch (e) { btn.disabled = false; rmToast(e.message); }
+}
+
+async function addReadingWords() {
+  const g = currentReading?.result?.glossary || [];
+  try {
+    const r = await api("/api/ielts/vocabulary/add", {method: "POST", body: JSON.stringify({
+      items: g, level: currentReading.level, topic: `Reading: ${currentReading.title || ""}`.slice(0, 100)})});
+    document.getElementById("readingWordsMsg").textContent = T("r_added", {n: r.added.length});
+  } catch (e) { rmToast(e.message); }
+}
+
+// One language for the interface and the AI explanations: the first visit saves the language shown.
+(function syncLanguageOnce() {
+  const original = showApp;
+  showApp = async function () {
+    await original();
+    applyUiLang();
+    let saved = null;
+    try { saved = localStorage.getItem("uiLang"); } catch (e) {}
+    if (!saved) {
+      const lang = uiLang();
+      try { localStorage.setItem("uiLang", lang); } catch (e) {}
+      api("/api/profile/language", {method: "POST", body: JSON.stringify({language: lang})}).catch(() => {});
+    }
+  };
+})();

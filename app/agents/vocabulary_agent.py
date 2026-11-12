@@ -58,14 +58,21 @@ Rules:
 """
 
 
-def create_set(topic: str, level: str = "B1") -> dict:
+TRANSLATION = {"ru": "Russian", "kk": "Kazakh"}
+
+
+def create_set(topic: str, level: str = "B1", language: str = "en") -> dict:
+    extra = ""
+    if language in TRANSLATION:
+        extra = (f"\nAlso add to every item a field translation: a short {TRANSLATION[language]} translation of the word "
+                 f"in this meaning. The tip is written in {TRANSLATION[language]}.")
     return ask_json(
-        SET_INSTRUCTIONS,
+        SET_INSTRUCTIONS + extra,
         f"Topic: {topic}\nCEFR target: {level}",
     )
 
 
-def create_practice(topic: str, level: str, items: list[dict]) -> dict:
+def create_practice(topic: str, level: str, items: list[dict], language: str = "en") -> dict:
     source = [
         {
             "word": x.get("word"),
@@ -77,7 +84,8 @@ def create_practice(topic: str, level: str, items: list[dict]) -> dict:
         for x in items
         if x.get("word")
     ]
+    from app.agents.ielts_rubrics import language_rule
     return ask_json(
-        PRACTICE_INSTRUCTIONS,
+        PRACTICE_INSTRUCTIONS + "\n" + language_rule(language) + " This applies to explanations only.",
         f"Topic: {topic}\nCEFR target: {level}\nVocabulary source:\n{source}",
     )

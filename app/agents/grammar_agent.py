@@ -18,8 +18,10 @@ If the input is already correct, praise it briefly and make practice slightly ha
 """
 
 
-def analyze(text: str, level: str = "not assessed") -> dict:
+def analyze(text: str, level: str = "not assessed", language: str = "en") -> dict:
+    from app.agents.ielts_rubrics import language_rule
     return ask_json(
-        INSTRUCTIONS,
+        INSTRUCTIONS + "\n" + language_rule(language) + " This applies to summary, explanations and rule names; "
+        "corrected_text and practice stay in English.",
         f"Current overall learner profile: {level}\nLearner text:\n{text}",
     )
