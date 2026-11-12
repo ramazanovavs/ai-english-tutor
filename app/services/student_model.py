@@ -272,3 +272,31 @@ def record_activity(
     ).eq("id", old["id"]).execute()
 
     _recalculate_overall_cefr(user_id)
+
+
+def apply_placement(user_id: str, levels: dict) -> None:
+    """
+    The placement test is direct evidence: it sets each measured skill to its CEFR level
+    (sublevel .1 -> score 72 "proficient", .2 or C2 -> score 88 "strong"), then recalculates the overall level.
+    """
+    ensure_profile(user_id)
+    db = admin_db()
+    rows = db.table("student_skills").select("*").eq("user_id", user_id).execute().data or []
+    by_cat = {r["category"]: r for r in rows}
+    now = datetime.now(timezone.utc).isoformat()
+    for category in SKILL_CATEGORIES:
+        sub = levels.get(category)
+        level = _valid_level(str(sub or "")[:2])
+        row = by_cat.get(category)
+        if not level or not row:
+            continue
+        score = 72 if str(sub).endswith(".1") else 88
+        db.table("student_skills").update({
+            "level": level, "score": score, "mastery_status": mastery_from_score(score),
+            "attempts": int(row.get("attempts") or 0) + 1,
+            "last_tested_level": level, "last_test_score": score,
+            "evidence_count": int(row.get("evidence_count") or 0) + 1,
+            "confidence": max(float(row.get("confidence") or 0), 60),
+            "last_practiced": now,
+        }).eq("id", row["id"]).execute()
+    _recalculate_overall_cefr(user_id)

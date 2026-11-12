@@ -40,6 +40,9 @@
           <span id="navEmail"></span>
           <span id="navAdmin" class="badge text-bg-warning ms-1 d-none">admin</span>
         </span>
+        <select id="uiLang" class="form-select form-select-sm w-auto" title="Language / Тіл / Язык" onchange="setUiLang(this.value)">
+          <option value="ru">RU</option><option value="kk">KZ</option><option value="en">EN</option>
+        </select>
         <button class="btn btn-sm btn-outline-secondary" onclick="signOut()">Sign out</button>
       </div>
     </div>
@@ -50,6 +53,7 @@
       <aside class="col-lg-3 col-xl-2">
         <div class="menu-card">
           <button class="menu-btn active" data-page="dashboard">🏠 Dashboard</button>
+          <button class="menu-btn" data-page="roadmap" id="menuRoadmap">🧭 Мой путь</button>
           <button class="menu-btn" data-page="tutor">💬 AI Tutor</button>
           <button class="menu-btn" data-page="grammar">🧠 Grammar Coach</button>
           <button class="menu-btn" data-page="vocabulary">🔤 Vocabulary</button>
@@ -78,11 +82,16 @@
             </div>
             <button class="btn btn-light" onclick="openPage('tutor')">Start practice</button>
           </div>
+          <div id="roadmapDashCard" class="mb-3"></div>
           <div class="row g-3" id="skillCards"></div>
           <div class="card-soft mt-4">
             <h5>AI recommendation</h5>
             <p id="recommendation" class="mb-0">Loading your learning profile…</p>
           </div>
+        </div>
+
+        <div id="page-roadmap" class="page d-none">
+          <div id="roadmapRoot"><div class="loader">Loading…</div></div>
         </div>
 
         <div id="page-tutor" class="page d-none">
@@ -109,7 +118,7 @@
             <div class="col-md-7"><input id="vocabTopic" class="form-control" placeholder="Topic, e.g. academic presentations"></div>
             <div class="col-md-3">
               <select id="vocabLevel" class="form-select">
-                <option>A2</option><option selected>B1</option><option>B2</option><option>C1</option>
+                <option>A1</option><option>A2</option><option selected>B1</option><option>B2</option><option>C1</option><option>C2</option>
               </select>
             </div>
             <div class="col-md-2 d-grid"><button class="btn btn-primary" onclick="makeVocab()">Generate</button></div>
@@ -185,7 +194,7 @@
           <div class="row g-2 mb-3">
             <div class="col-md-4">
               <select id="testLevel" class="form-select">
-                <option>A2</option><option selected>B1</option><option>B2</option><option>C1</option>
+                <option>A1</option><option>A2</option><option selected>B1</option><option>B2</option><option>C1</option><option>C2</option>
               </select>
             </div>
             <div class="col-md-5">

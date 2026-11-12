@@ -20,7 +20,7 @@ from app.agents.grammar_agent import analyze as grammar_analyze
 from app.agents.writing_agent import analyze as writing_analyze
 from app.agents.vocabulary_agent import create_set, create_practice
 from app.agents import listening_agent
-from app.services import listening_audio, listening_bank, ielts_analytics
+from app.services import listening_audio, listening_bank, ielts_analytics, placement, roadmap as roadmap_store
 from app.config import get_settings
 from app.agents.assessment_agent import generate as generate_test
 from app.services.openai_service import ask_text, ask_json, transcribe_audio, synthesize_speech
@@ -124,6 +124,14 @@ def me(user=Depends(require_user)):
     context = get_student_context(user["id"])
     context["email"] = user.get("email")
     context["is_admin"] = _is_admin(user)
+    try:  # level roadmap summary for the Dashboard (missing table = roadmap not set up yet)
+        rmv = roadmap_store.view(user["id"])
+        cur = rmv["current"]
+        context["roadmap"] = {"current": cur, "levels": rmv["levels"], "next": rmv["next"],
+                              "progress": rmv["progress"].get(cur) if cur else None,
+                              "placement_status": rmv["placement"]["status"]}
+    except Exception:
+        context["roadmap"] = None
     return context
 
 
@@ -2183,3 +2191,139 @@ def admin_storage_cleanup_run(user=Depends(require_user)):
     except Exception as exc:
         logger.exception("Storage cleanup failed")
         raise HTTPException(status_code=500, detail=f"Cleanup failed: {exc}")
+
+
+# ========================= LEVEL ROADMAP AND PLACEMENT TEST =========================
+
+class PlacementAnswerPayload(BaseModel):
+    item_id: str = Field(max_length=20)
+    choice: str = Field(max_length=300)
+
+
+class PlacementAnswersPayload(BaseModel):
+    answers: dict[str, str] = Field(default_factory=dict)
+
+
+class PlacementWritingPayload(BaseModel):
+    text: str | None = Field(default=None, max_length=8000)
+
+
+class PlacementSpeakingDonePayload(BaseModel):
+    skip: bool = False
+
+
+class RoadmapEvidencePayload(BaseModel):
+    item_id: str = Field(max_length=20)
+    module: str = Field(max_length=30)
+    score: float | None = None
+    level: str | None = Field(default=None, max_length=10)
+
+
+class LanguagePayload(BaseModel):
+    language: Literal["ru", "kk", "en"]
+
+
+ROADMAP_SETUP = ("The level roadmap is not set up in Supabase yet: run database/roadmap.sql in the "
+                 "Supabase SQL Editor.")
+
+
+def _placement_call(fn, *args):
+    try:
+        return fn(*args)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Placement step failed")
+        if "learner_roadmap" in str(exc):
+            raise HTTPException(status_code=503, detail=ROADMAP_SETUP)
+        raise HTTPException(status_code=503, detail=f"{AI_DOWN} Your progress is saved — try again in a minute.")
+
+
+@router.post("/profile/language")
+def set_language(payload: LanguagePayload, user=Depends(require_user)):
+    """One language setting for explanations, feedback and the roadmap (ru / kk / en)."""
+    ensure_profile(user["id"], user.get("email"))
+    admin_db().table("profiles").update({"preferred_explanation_language": payload.language}).eq("id", user["id"]).execute()
+    return {"language": payload.language}
+
+
+@router.get("/roadmap")
+def roadmap_view(user=Depends(require_user)):
+    band = None
+    try:
+        rows = admin_db().table("ielts_profiles").select("current_overall_band").eq("user_id", user["id"]).limit(1).execute().data
+        band = (rows or [{}])[0].get("current_overall_band")
+    except Exception:
+        pass
+    try:
+        data = roadmap_store.view(user["id"], float(band) if band is not None else None)
+    except Exception as exc:
+        logger.exception("Roadmap failed")
+        raise HTTPException(status_code=503, detail=ROADMAP_SETUP if "learner_roadmap" in str(exc) else str(exc))
+    data["language"] = _feedback_lang(user["id"])
+    return data
+
+
+@router.post("/roadmap/evidence")
+def roadmap_evidence(payload: RoadmapEvidencePayload, user=Depends(require_user)):
+    try:
+        return roadmap_store.record_evidence(user["id"], payload.item_id, payload.module, payload.score, payload.level)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown roadmap item.")
+
+
+@router.post("/placement/start")
+def placement_start(user=Depends(require_user)):
+    ensure_profile(user["id"], user.get("email"))
+    _placement_call(placement.start, user["id"])
+    return placement.public_state(user["id"])
+
+
+@router.get("/placement")
+def placement_state(user=Depends(require_user)):
+    return _placement_call(placement.public_state, user["id"])
+
+
+@router.post("/placement/answer")
+def placement_answer(payload: PlacementAnswerPayload, user=Depends(require_user)):
+    _placement_call(placement.answer_core, user["id"], payload.item_id, payload.choice)
+    return placement.public_state(user["id"])
+
+
+@router.post("/placement/reading")
+def placement_reading(payload: PlacementAnswersPayload, user=Depends(require_user)):
+    _placement_call(placement.submit_reading, user["id"], payload.answers)
+    return placement.public_state(user["id"])
+
+
+@router.post("/placement/listening")
+def placement_listening(payload: PlacementAnswersPayload, user=Depends(require_user)):
+    _placement_call(placement.submit_listening, user["id"], payload.answers)
+    return placement.public_state(user["id"])
+
+
+@router.post("/placement/writing")
+def placement_writing(payload: PlacementWritingPayload, user=Depends(require_user)):
+    _placement_call(placement.submit_writing, user["id"], payload.text)
+    return placement.public_state(user["id"])
+
+
+@router.post("/placement/speaking/answer/{index}")
+async def placement_speaking_answer(index: int, audio: UploadFile = File(...), user=Depends(require_user)):
+    data = await audio.read()
+    if not data or len(data) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="The recording is empty or too long.")
+    if index not in (0, 1):
+        raise HTTPException(status_code=400, detail="Unknown question.")
+    content_type = (audio.content_type or "audio/webm").split(";", 1)[0]
+    from starlette.concurrency import run_in_threadpool
+    await run_in_threadpool(_placement_call, placement.speaking_answer, user["id"], index, data, content_type)
+    return placement.public_state(user["id"])
+
+
+@router.post("/placement/speaking/submit")
+def placement_speaking_submit(payload: PlacementSpeakingDonePayload, user=Depends(require_user)):
+    _placement_call(placement.submit_speaking, user["id"], payload.skip)
+    return placement.public_state(user["id"])

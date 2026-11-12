@@ -116,6 +116,7 @@ async function loadProfile() {
   try {
     currentProfile = await api("/api/me");
     renderDashboard();
+    renderRoadmapDashCard();
   } catch (e) {
     alert(e.message);
   }
@@ -236,6 +237,8 @@ function openPage(name) {
   if (name === "progress" || name === "dashboard") loadProfile();
   if (name === "listening") suggestListeningLevel();
   if (name !== "listening" && typeof stopListeningAudio === "function") stopListeningAudio();
+  if (name === "roadmap") loadRoadmap();
+  if (typeof renderRoadmapTaskBanner === "function") renderRoadmapTaskBanner(name);
 }
 
 document.querySelectorAll(".menu-btn").forEach(btn => {
@@ -564,6 +567,7 @@ async function submitVocabPractice() {
         answers
       })
     });
+    roadmapReport("vocabulary", d.score);
 
     for (const item of (d.details || [])) {
       const el = document.getElementById(`vocab_feedback_${item.id}`);
@@ -607,6 +611,7 @@ async function checkWriting() {
   loading("writingResult", "Reviewing writing…");
   try {
     const d = await api("/api/writing", {method:"POST", body:JSON.stringify({text, purpose})});
+    roadmapReport("writing", d.score, d.estimated_level);
     document.getElementById("writingResult").innerHTML = `
       <h4>${esc(d.score)}% · approx. ${esc(d.estimated_level)}</h4>
       <h6>Strengths</h6><ul>${(d.strengths || []).map(x=>`<li>${esc(x)}</li>`).join("")}</ul>
@@ -688,6 +693,7 @@ async function checkSpeaking() {
       method:"POST",
       body:JSON.stringify({text, scenario})
     });
+    roadmapReport("speaking", d.practice_score, d.estimated_level);
 
     document.getElementById("speakingResult").innerHTML = `
       <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
@@ -756,6 +762,7 @@ async function submitTest() {
         answers
       })
     });
+    roadmapReport("test", d.score);
     const mastery = d.mastery_status
       ? d.mastery_status.charAt(0).toUpperCase() + d.mastery_status.slice(1)
       : "";
@@ -1993,6 +2000,7 @@ async function submitListening() {
       body: JSON.stringify({test_id: currentListening.test_id, answers})
     });
     listeningChecked = true;
+    roadmapReport("listening", d.score);
 
     for (const item of (d.details || [])) {
       const el = document.getElementById(`listen_feedback_${item.id}`);
@@ -2807,4 +2815,526 @@ function sendIELTSToGrammarCoach(kind) {
 function learnTab(kind, name, btn) {
   ["Up", "Model", "Study"].forEach(n => document.getElementById(`learn${n}-${kind}`)?.classList.toggle("d-none", n !== name));
   btn.closest(".nav").querySelectorAll(".nav-link").forEach(b => b.classList.toggle("active", b === btn));
+}
+
+// ========================= Level roadmap ("Мой путь") and placement test =========================
+const RM_T = {
+  menu: {ru: "🧭 Мой путь", kk: "🧭 Менің жолым", en: "🧭 My path"},
+  title: {ru: "Мой путь в английском", kk: "Ағылшын тіліндегі менің жолым", en: "My English path"},
+  intro_title: {ru: "Определим ваш уровень", kk: "Деңгейіңізді анықтайық", en: "Let's find your level"},
+  intro_text: {ru: "Входной тест покажет уровень по каждому навыку — с подуровнями от A1.1 до C2 — и построит ваш путь: что уже получается и что тренировать дальше.",
+               kk: "Кіріс тесті әр дағды бойынша деңгейіңізді A1.1-ден C2-ге дейінгі ішкі деңгейлермен көрсетіп, жолыңызды құрады: не жақсы шығады және әрі қарай нені жаттықтыру керек.",
+               en: "The placement test shows your level in every skill — with sublevels from A1.1 to C2 — and builds your path: what you can already do and what to practise next."},
+  p1: {ru: "Грамматика и лексика — 18 вопросов, подстраиваются под ваши ответы (~8 мин)", kk: "Грамматика және лексика — жауаптарыңызға бейімделетін 18 сұрақ (~8 мин)", en: "Grammar and vocabulary — 18 questions that adapt to your answers (~8 min)"},
+  p2: {ru: "Чтение — текст вашего уровня и 6 вопросов (~6 мин)", kk: "Оқылым — деңгейіңізге сай мәтін және 6 сұрақ (~6 мин)", en: "Reading — a text at your level and 6 questions (~6 min)"},
+  p3: {ru: "Аудирование — запись, можно прослушать 2 раза (~6 мин)", kk: "Тыңдалым — жазба, 2 рет тыңдауға болады (~6 мин)", en: "Listening — a recording you can play twice (~6 min)"},
+  p4: {ru: "Письмо — короткий текст (~8 мин, можно пропустить)", kk: "Жазылым — қысқа мәтін (~8 мин, өткізіп жіберуге болады)", en: "Writing — a short text (~8 min, can be skipped)"},
+  p5: {ru: "Говорение — 2 ответа голосом до 1 минуты (нужен микрофон, можно пропустить)", kk: "Айтылым — 1 минутқа дейінгі 2 дауыстық жауап (микрофон қажет, өткізіп жіберуге болады)", en: "Speaking — 2 spoken answers up to 1 minute (microphone needed, can be skipped)"},
+  intro_note: {ru: "Около 30 минут. Можно прерваться — прогресс сохраняется. Не пользуйтесь переводчиком: тест нужен, чтобы подобрать задания именно вам.",
+               kk: "Шамамен 30 минут. Тоқтап, кейін жалғастыруға болады — нәтиже сақталады. Аудармашыны қолданбаңыз: тест тапсырмаларды дәл сізге лайықтау үшін керек.",
+               en: "About 30 minutes. You can stop and continue later — progress is saved. Please don't use a translator: the test is there to choose tasks for you."},
+  start: {ru: "Начать тест", kk: "Тестті бастау", en: "Start the test"},
+  q_of: {ru: "Вопрос {n} из {t}", kk: "{t} сұрақтың {n}-сі", en: "Question {n} of {t}"},
+  part: {ru: "Часть {n} из 5", kk: "5 бөлімнің {n}-бөлімі", en: "Part {n} of 5"},
+  core_title: {ru: "Грамматика и лексика", kk: "Грамматика және лексика", en: "Grammar and vocabulary"},
+  core_hint: {ru: "Выберите вариант для пропуска. Если не уверены — выберите наиболее вероятный.", kk: "Бос орынға сәйкес нұсқаны таңдаңыз. Сенімді болмасаңыз — ең ықтималын таңдаңыз.", en: "Choose the option that fits the gap. If you are not sure, choose the most likely one."},
+  reading_title: {ru: "Чтение", kk: "Оқылым", en: "Reading"},
+  listening_title: {ru: "Аудирование", kk: "Тыңдалым", en: "Listening"},
+  writing_title: {ru: "Письмо", kk: "Жазылым", en: "Writing"},
+  speaking_title: {ru: "Говорение", kk: "Айтылым", en: "Speaking"},
+  preparing: {ru: "Готовим задание вашего уровня…", kk: "Деңгейіңізге сай тапсырма дайындалуда…", en: "Preparing a task at your level…"},
+  not_available: {ru: "Эта часть сейчас недоступна (сервис ИИ занят). Её можно пропустить — уровень по ней определится позже, по первым заданиям.",
+                  kk: "Бұл бөлім қазір қолжетімсіз (ЖИ сервисі бос емес). Оны өткізіп жіберуге болады — деңгей кейін, алғашқы тапсырмалар бойынша анықталады.",
+                  en: "This part is unavailable right now (the AI service is busy). You can skip it — this level will be found later from your first tasks."},
+  skip_part: {ru: "Пропустить часть", kk: "Бөлімді өткізу", en: "Skip this part"},
+  next: {ru: "Дальше", kk: "Әрі қарай", en: "Next"},
+  listening_hint: {ru: "Сначала прочитайте вопросы, затем нажмите «Слушать». Запись можно прослушать 2 раза.", kk: "Алдымен сұрақтарды оқып, содан кейін «Тыңдау» батырмасын басыңыз. Жазбаны 2 рет тыңдауға болады.", en: "Read the questions first, then press Listen. You can play the recording twice."},
+  play: {ru: "▶ Слушать", kk: "▶ Тыңдау", en: "▶ Listen"},
+  plays_left: {ru: "Осталось прослушиваний: {n}", kk: "Қалған тыңдау саны: {n}", en: "Plays left: {n}"},
+  your_answer: {ru: "Ваш ответ", kk: "Жауабыңыз", en: "Your answer"},
+  words: {ru: "слов", kk: "сөз", en: "words"},
+  target_words: {ru: "Объём: {w} слов", kk: "Көлемі: {w} сөз", en: "Length: {w} words"},
+  submit: {ru: "Отправить", kk: "Жіберу", en: "Submit"},
+  skip_writing: {ru: "Пропустить письмо", kk: "Жазылымды өткізу", en: "Skip writing"},
+  speaking_hint: {ru: "Ответьте на каждый вопрос вслух, до 1 минуты. Говорите естественно, как в разговоре.", kk: "Әр сұраққа дауыстап, 1 минутқа дейін жауап беріңіз. Әңгімедегідей табиғи сөйлеңіз.", en: "Answer each question aloud, up to 1 minute. Speak naturally, as in a conversation."},
+  record: {ru: "🎙 Записать ответ", kk: "🎙 Жауапты жазу", en: "🎙 Record answer"},
+  stop: {ru: "■ Остановить", kk: "■ Тоқтату", en: "■ Stop"},
+  recorded: {ru: "✓ Ответ записан", kk: "✓ Жауап жазылды", en: "✓ Answer recorded"},
+  rerecord: {ru: "Перезаписать", kk: "Қайта жазу", en: "Record again"},
+  uploading: {ru: "Сохраняем…", kk: "Сақталуда…", en: "Saving…"},
+  finish_test: {ru: "Завершить тест", kk: "Тестті аяқтау", en: "Finish the test"},
+  skip_speaking: {ru: "Пропустить говорение", kk: "Айтылымды өткізу", en: "Skip speaking"},
+  mic_error: {ru: "Нет доступа к микрофону.", kk: "Микрофонға рұқсат жоқ.", en: "No access to the microphone."},
+  assessing: {ru: "Проверяем письмо и речь — это займёт до минуты…", kk: "Жазылым мен айтылымды тексеріп жатырмыз — бір минутқа дейін…", en: "Checking your writing and speaking — up to a minute…"},
+  your_level: {ru: "Ваш уровень", kk: "Сіздің деңгейіңіз", en: "Your level"},
+  not_measured: {ru: "не определён", kk: "анықталмаған", en: "not measured"},
+  ielts_title: {ru: "Мостик к IELTS", kk: "IELTS-ке көпір", en: "Bridge to IELTS"},
+  ielts_est: {ru: "Ориентировочно IELTS {b}", kk: "Шамамен IELTS {b}", en: "Indicative IELTS {b}"},
+  ielts_early: {ru: "До IELTS пока рано: на этом уровне экзамен покажет меньше 3.0. Сначала дойдите до A2.2–B1.", kk: "IELTS-ке әлі ерте: бұл деңгейде емтихан 3.0-ден төмен көрсетеді. Алдымен A2.2–B1 деңгейіне жетіңіз.", en: "Too early for IELTS: at this level the exam would show below 3.0. Reach A2.2–B1 first."},
+  ielts_hint: {ru: "Готовиться к IELTS имеет смысл с B1.2; для Band 6.5 нужен уверенный B2, для 7+ — C1.", kk: "IELTS-ке дайындықты B1.2-ден бастаған жөн; Band 6.5 үшін сенімді B2, 7+ үшін C1 қажет.", en: "IELTS preparation makes sense from B1.2; Band 6.5 needs a solid B2, 7+ needs C1."},
+  ielts_current: {ru: "Ваш последний результат в IELTS-разделе: {b}", kk: "IELTS бөліміндегі соңғы нәтижеңіз: {b}", en: "Your latest result in the IELTS section: {b}"},
+  ielts_open: {ru: "Открыть IELTS-раздел", kk: "IELTS бөлімін ашу", en: "Open the IELTS section"},
+  ielts_note: {ru: "Соответствие ориентировочное (по данным IELTS о связи со шкалой CEFR), это не прогноз балла.", kk: "Сәйкестік шамамен алынған (IELTS-тің CEFR шкаласымен байланысы бойынша), бұл балл болжамы емес.", en: "Indicative only (based on IELTS guidance on CEFR alignment), not a score forecast."},
+  map_title: {ru: "Карта уровней", kk: "Деңгейлер картасы", en: "Level map"},
+  map_hint: {ru: "Нажмите на ступень, чтобы увидеть её умения.", kk: "Дағдыларын көру үшін сатыны басыңыз.", en: "Click a step to see its can-do statements."},
+  st_confirmed: {ru: "Подтверждено", kk: "Расталды", en: "Confirmed"},
+  st_practised: {ru: "Тренировали — нужно 70% и выше", kk: "Жаттықтыңыз — 70% және одан жоғары қажет", en: "Practised — needs 70% or more"},
+  st_new: {ru: "Ещё не подтверждено", kk: "Әлі расталмаған", en: "Not confirmed yet"},
+  by_test: {ru: "по входному тесту", kk: "кіріс тесті бойынша", en: "by the placement test"},
+  train: {ru: "Тренировать", kk: "Жаттығу", en: "Practise"},
+  current_tag: {ru: "вы здесь", kk: "сіз осындасыз", en: "you are here"},
+  next_tag: {ru: "следующая цель", kk: "келесі мақсат", en: "next goal"},
+  retake: {ru: "Пройти тест заново", kk: "Тестті қайта тапсыру", en: "Retake the test"},
+  retake_confirm: {ru: "Начать входной тест заново? Подтверждённые умения сохранятся.", kk: "Кіріс тестін қайта бастайсыз ба? Расталған дағдылар сақталады.", en: "Start the placement test again? Confirmed skills are kept."},
+  test_results: {ru: "Результаты входного теста", kk: "Кіріс тестінің нәтижелері", en: "Placement test results"},
+  task_from_path: {ru: "Задание из «Моего пути»", kk: "«Менің жолымнан» тапсырма", en: "Task from My path"},
+  task_label: {ru: "Тема", kk: "Тақырып", en: "Task"},
+  vocab_task: {ru: "Сгенерируйте набор слов и пройдите практику — умение подтверждается результатом практики.", kk: "Сөздер жинағын жасап, жаттығудан өтіңіз — дағды жаттығу нәтижесімен расталады.", en: "Generate the word set and do the practice — the practice score confirms the skill."},
+  speaking_task: {ru: "Запишите ответ на тему и нажмите «Get feedback».", kk: "Тақырып бойынша жауап жазып, «Get feedback» батырмасын басыңыз.", en: "Record an answer on the topic and press “Get feedback”."},
+  back_to_path: {ru: "← к карте", kk: "← картаға", en: "← back to the map"},
+  toast_confirmed: {ru: "✓ Умение подтверждено", kk: "✓ Дағды расталды", en: "✓ Skill confirmed"},
+  toast_practised: {ru: "Засчитано как тренировка. Для подтверждения нужно 70% и выше (письмо и речь — уровень {l}).", kk: "Жаттығу ретінде есептелді. Растау үшін 70% және одан жоғары қажет (жазылым мен айтылым — {l} деңгейі).", en: "Counted as practice. To confirm you need 70% or more (writing and speaking: level {l})."},
+  progress_line: {ru: "{p}% умений уровня {s} подтверждено", kk: "{s} деңгейі дағдыларының {p}%-ы расталды", en: "{p}% of {s} skills confirmed"},
+  continue: {ru: "Продолжить тест", kk: "Тестті жалғастыру", en: "Continue the test"},
+  open_path: {ru: "Открыть мой путь", kk: "Менің жолымды ашу", en: "Open my path"},
+  dash_no_test: {ru: "Пройдите входной тест (≈30 мин) — и сайт построит ваш путь от текущего уровня.", kk: "Кіріс тестін тапсырыңыз (≈30 мин) — сайт ағымдағы деңгейіңізден бастап жолыңызды құрады.", en: "Take the placement test (≈30 min) and the site will build your path from your current level."},
+  strengths: {ru: "Сильные стороны", kk: "Күшті жақтары", en: "Strengths"},
+  improve: {ru: "Что улучшить", kk: "Нені жақсарту керек", en: "To improve"},
+  skipped: {ru: "пропущено", kk: "өткізілді", en: "skipped"},
+  error: {ru: "Ошибка", kk: "Қате", en: "Error"},
+};
+const RM_SKILL_ICON = {grammar: "🧠", vocabulary: "🔤", reading: "📖", listening: "🎧", writing: "✍️", speaking: "🎙"};
+let roadmapData = null, placementState = null, placementTimer = null, roadmapSelected = null, roadmapContext = null;
+let rmRecorder = null, rmStream = null, rmChunks = [], rmRecTimer = null;
+
+function uiLang() {
+  const saved = (() => { try { return localStorage.getItem("uiLang"); } catch (e) { return null; } })();
+  const fromProfile = currentProfile?.profile?.preferred_explanation_language;
+  // the profile default is "en" for everyone, so an explicit choice on this device wins, and "en" from the
+  // profile counts only after the learner picked it (it is then also saved on this device)
+  const lang = saved || (roadmapData?.language !== "en" && roadmapData?.language) || (fromProfile !== "en" && fromProfile) || "ru";
+  return ["ru", "kk", "en"].includes(lang) ? lang : "ru";
+}
+
+function T(key, vars = {}) {
+  const entry = RM_T[key] || {};
+  let s = entry[uiLang()] || entry.en || key;
+  for (const [k, v] of Object.entries(vars)) s = s.replace(`{${k}}`, v);
+  return s;
+}
+
+function applyUiLang() {
+  const sel = document.getElementById("uiLang");
+  if (sel) sel.value = uiLang();
+  const menu = document.getElementById("menuRoadmap");
+  if (menu) menu.textContent = T("menu");
+  const ielts = document.getElementById("ieltsFeedbackLang");
+  if (ielts) ielts.value = uiLang();
+}
+
+async function setUiLang(lang) {
+  try { localStorage.setItem("uiLang", lang); } catch (e) {}
+  if (roadmapData) roadmapData.language = lang;
+  if (currentProfile?.profile) currentProfile.profile.preferred_explanation_language = lang;
+  applyUiLang();
+  try { await api("/api/profile/language", {method: "POST", body: JSON.stringify({language: lang})}); } catch (e) { rmToast(e.message); }
+  renderRoadmapDashCard();
+  if (!document.getElementById("page-roadmap").classList.contains("d-none")) renderRoadmapPage();
+  const page = document.querySelector(".page:not(.d-none)")?.id?.replace("page-", "");
+  if (page) renderRoadmapTaskBanner(page);
+}
+
+function rmToast(text) {
+  const el = document.createElement("div");
+  el.className = "rm-toast";
+  el.textContent = text;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 6000);
+}
+
+function rmText(obj) { return obj?.[uiLang()] || obj?.en || ""; }
+
+function renderRoadmapDashCard() {
+  const box = document.getElementById("roadmapDashCard");
+  if (!box || !currentProfile) return;
+  applyUiLang();
+  const r = currentProfile.roadmap;
+  if (r === null || r === undefined) { box.innerHTML = ""; return; }
+  if (r.current) {
+    document.getElementById("navLevel").textContent = r.current;
+    const p = r.progress || {percent: 0};
+    box.innerHTML = `<div class="card-soft d-flex justify-content-between align-items-center flex-wrap gap-3">
+      <div><div class="small text-secondary">${esc(T("your_level"))}</div><div class="fs-3 fw-bold">${esc(r.current)}</div>
+        <div class="small">${esc(T("progress_line", {p: p.percent, s: r.current}))}</div>
+        <div class="progress mt-1" style="height:6px;width:260px"><div class="progress-bar" style="width:${Number(p.percent)}%"></div></div></div>
+      <button class="btn btn-primary" onclick="openPage('roadmap')">${esc(T("open_path"))}</button></div>`;
+  } else {
+    const inProgress = r.placement_status === "in_progress";
+    box.innerHTML = `<div class="card-soft d-flex justify-content-between align-items-center flex-wrap gap-3">
+      <div>${esc(T("dash_no_test"))}</div>
+      <button class="btn btn-primary" onclick="openPage('roadmap')">${esc(inProgress ? T("continue") : T("start"))}</button></div>`;
+  }
+}
+
+async function loadRoadmap() {
+  clearTimeout(placementTimer);
+  const root = document.getElementById("roadmapRoot");
+  try {
+    const [p, r] = await Promise.all([api("/api/placement"), api("/api/roadmap")]);
+    placementState = p;
+    roadmapData = r;
+    applyUiLang();
+    renderRoadmapPage();
+  } catch (e) {
+    root.innerHTML = `<div class="alert alert-warning">${esc(e.message)}</div>`;
+  }
+}
+
+function renderRoadmapPage() {
+  const p = placementState || {};
+  if (p.status === "in_progress") return renderPlacement();
+  if (roadmapData?.current) return renderRoadmapMap();
+  return renderPlacementIntro();
+}
+
+function renderPlacementIntro() {
+  document.getElementById("roadmapRoot").innerHTML = `
+    <h2>${esc(T("title"))}</h2>
+    <div class="card-soft">
+      <h4>${esc(T("intro_title"))}</h4>
+      <p>${esc(T("intro_text"))}</p>
+      <ol>${["p1", "p2", "p3", "p4", "p5"].map(k => `<li>${esc(T(k))}</li>`).join("")}</ol>
+      <p class="small text-secondary">${esc(T("intro_note"))}</p>
+      <button class="btn btn-primary btn-lg" onclick="startPlacement()">${esc(T("start"))}</button>
+    </div>`;
+}
+
+async function startPlacement() {
+  const root = document.getElementById("roadmapRoot");
+  root.innerHTML = `<div class="loader">…</div>`;
+  try {
+    placementState = await api("/api/placement/start", {method: "POST", body: "{}"});
+    renderPlacement();
+  } catch (e) { root.innerHTML = `<div class="alert alert-danger">${esc(e.message)}</div>`; }
+}
+
+function placementHeader(n, title) {
+  return `<div class="d-flex justify-content-between align-items-center mb-2">
+      <h3 class="mb-0">${esc(title)}</h3><span class="badge text-bg-light">${esc(T("part", {n}))}</span></div>
+    <div class="progress mb-3" style="height:6px"><div class="progress-bar" style="width:${(n - 1) * 20}%"></div></div>`;
+}
+
+function placementPoll(ms = 2000) {
+  clearTimeout(placementTimer);
+  placementTimer = setTimeout(async () => {
+    if (document.getElementById("page-roadmap").classList.contains("d-none")) return;
+    try {
+      placementState = await api("/api/placement");
+      if (placementState.stage === "done") { loadProfile(); return loadRoadmap(); }
+      renderPlacement();
+    } catch (e) { placementPoll(5000); }
+  }, ms);
+}
+
+async function placementPost(path, body, isForm = false) {
+  try {
+    placementState = isForm ? await apiForm(path, body) : await api(path, {method: "POST", body: JSON.stringify(body)});
+    if (placementState.stage === "done") { loadProfile(); return loadRoadmap(); }
+    renderPlacement();
+  } catch (e) { rmToast(e.message); }
+}
+
+function renderPlacement() {
+  const s = placementState || {};
+  const root = document.getElementById("roadmapRoot");
+  const stage = s.stage;
+  if (stage === "core" && s.item) {
+    const it = s.item;
+    root.innerHTML = placementHeader(1, T("core_title")) + `
+      <div class="card-soft">
+        <div class="small text-secondary mb-2">${esc(T("q_of", {n: it.number, t: it.total}))} · ${esc(T("core_hint"))}</div>
+        <div class="fs-5 fw-semibold mb-3">${esc(it.question)}</div>
+        <div class="d-grid gap-2">${it.options.map(o => `<button class="btn btn-outline-primary text-start"
+            onclick="this.parentElement.querySelectorAll('button').forEach(b=>b.disabled=true);placementPost('/api/placement/answer', {item_id: '${esc(it.id)}', choice: ${esc(JSON.stringify(o))}})">${esc(o)}</button>`).join("")}</div>
+      </div>`;
+    return;
+  }
+  if (stage === "reading") {
+    const r = s.reading || {};
+    let body;
+    if (r.status === "preparing") { body = `<div class="loader">${esc(T("preparing"))}</div>`; placementPoll(); }
+    else if (r.status === "ready" && r.content) {
+      const c = r.content;
+      body = `<div class="card-soft mb-3"><h5>${esc(c.title || "")}</h5><div class="reading-passage">${esc(c.passage || "").replace(/\n/g, "<br>")}</div></div>
+        ${c.questions.map(q => `<div class="card-soft my-2"><div class="fw-semibold mb-2">${esc(q.id)}. ${esc(q.question)}</div>
+          ${(q.options || []).map((o, i) => `<div class="form-check"><input class="form-check-input" type="radio" name="plr${q.id}" id="plr${q.id}_${i}" value="${esc(o)}">
+            <label class="form-check-label" for="plr${q.id}_${i}">${esc(o)}</label></div>`).join("")}</div>`).join("")}
+        <button class="btn btn-primary" onclick="submitPlacementReading()">${esc(T("next"))}</button>`;
+    } else {
+      body = `<div class="alert alert-warning">${esc(T("not_available"))}</div>
+        <button class="btn btn-outline-primary" onclick="placementPost('/api/placement/reading', {answers: {}})">${esc(T("skip_part"))}</button>`;
+    }
+    root.innerHTML = placementHeader(2, T("reading_title")) + body;
+    return;
+  }
+  if (stage === "listening") {
+    const l = s.listening || {};
+    let body;
+    if (l.status === "preparing") { body = `<div class="loader">${esc(T("preparing"))}</div>`; placementPoll(); }
+    else if (l.status === "ready" && l.content) {
+      const c = l.content;
+      body = `<div class="card-soft mb-3"><p class="mb-2">${esc(T("listening_hint"))}</p>
+          <button id="plPlayBtn" class="btn btn-primary" onclick="playPlacementListening('${esc(c.test_id)}')">${esc(T("play"))}</button>
+          <span id="plPlayState" class="small text-secondary ms-2"></span></div>
+        ${c.questions.map(q => `<div class="card-soft my-2"><div class="fw-semibold mb-2">${esc(q.id)}. ${esc(q.question)}</div>
+          ${(q.options || []).length ? q.options.map((o, i) => `<div class="form-check"><input class="form-check-input" type="radio" name="pll${q.id}" id="pll${q.id}_${i}" value="${esc(o)}">
+            <label class="form-check-label" for="pll${q.id}_${i}">${esc(o)}</label></div>`).join("")
+            : `<input class="form-control" name="pll${q.id}" placeholder="${esc(T("your_answer"))}">`}</div>`).join("")}
+        <button class="btn btn-primary" onclick="submitPlacementListening()">${esc(T("next"))}</button>`;
+    } else {
+      body = `<div class="alert alert-warning">${esc(T("not_available"))}</div>
+        <button class="btn btn-outline-primary" onclick="placementPost('/api/placement/listening', {answers: {}})">${esc(T("skip_part"))}</button>`;
+    }
+    root.innerHTML = placementHeader(3, T("listening_title")) + body;
+    return;
+  }
+  if (stage === "writing") {
+    const w = s.writing || {};
+    root.innerHTML = placementHeader(4, T("writing_title")) + `
+      <div class="card-soft"><p class="fw-semibold mb-1">${esc(w.prompt || "")}</p>
+        <p class="small text-secondary">${esc(T("target_words", {w: w.words || ""}))}</p>
+        <textarea id="plWriting" class="form-control" rows="9" oninput="document.getElementById('plWords').textContent=(this.value.trim().split(/\\s+/).filter(Boolean).length)+' ${esc(T("words"))}'"></textarea>
+        <div class="d-flex justify-content-between align-items-center mt-2 flex-wrap gap-2"><span id="plWords" class="small text-secondary">0 ${esc(T("words"))}</span>
+          <span><button class="btn btn-outline-secondary me-2" onclick="placementPost('/api/placement/writing', {text: null})">${esc(T("skip_writing"))}</button>
+          <button class="btn btn-primary" onclick="placementPost('/api/placement/writing', {text: document.getElementById('plWriting').value})">${esc(T("submit"))}</button></span></div></div>`;
+    return;
+  }
+  if (stage === "speaking") {
+    const sp = s.speaking || {};
+    const answered = new Set(sp.answered || []);
+    root.innerHTML = placementHeader(5, T("speaking_title")) + `
+      <p>${esc(T("speaking_hint"))}</p>
+      ${sp.questions.map((q, i) => `<div class="card-soft my-2"><div class="fw-semibold mb-2">${i + 1}. ${esc(q)}</div>
+        <button id="plRec${i}" class="btn ${answered.has(String(i)) ? "btn-outline-secondary" : "btn-outline-primary"}" onclick="togglePlacementRecording(${i})">
+          ${esc(answered.has(String(i)) ? T("rerecord") : T("record"))}</button>
+        <span id="plRecState${i}" class="small ms-2 ${answered.has(String(i)) ? "text-success" : "text-secondary"}">${answered.has(String(i)) ? esc(T("recorded")) : ""}</span></div>`).join("")}
+      <div class="mt-3"><button class="btn btn-outline-secondary me-2" onclick="placementPost('/api/placement/speaking/submit', {skip: true})">${esc(T("skip_speaking"))}</button>
+        <button class="btn btn-primary" ${answered.size ? "" : "disabled"} onclick="placementPost('/api/placement/speaking/submit', {skip: false})">${esc(T("finish_test"))}</button></div>`;
+    return;
+  }
+  if (stage === "assessing") {
+    root.innerHTML = `<h2>${esc(T("title"))}</h2><div class="loader">${esc(T("assessing"))}</div>`;
+    placementPoll(3000);
+    return;
+  }
+  loadRoadmap();
+}
+
+function submitPlacementReading() {
+  const answers = {};
+  (placementState.reading?.content?.questions || []).forEach(q => {
+    const el = document.querySelector(`input[name="plr${q.id}"]:checked`);
+    if (el) answers[String(q.id)] = el.value;
+  });
+  placementPost("/api/placement/reading", {answers});
+}
+
+function submitPlacementListening() {
+  const answers = {};
+  (placementState.listening?.content?.questions || []).forEach(q => {
+    const el = document.querySelector(`input[name="pll${q.id}"]:checked`) || document.querySelector(`input[name="pll${q.id}"]:not([type=radio])`);
+    if (el && el.value.trim()) answers[String(q.id)] = el.value.trim();
+  });
+  if (window.rmAudio) { window.rmAudio.pause(); window.rmAudio = null; }
+  placementPost("/api/placement/listening", {answers});
+}
+
+async function playPlacementListening(testId) {
+  const btn = document.getElementById("plPlayBtn");
+  const state = document.getElementById("plPlayState");
+  btn.disabled = true;
+  state.textContent = T("preparing");
+  try {
+    const res = await fetch(`/api/listening/${testId}/audio`, {headers: {"Authorization": `Bearer ${currentSession.access_token}`}});
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      if (res.status !== 403) btn.disabled = false;
+      state.textContent = d.detail || `Error ${res.status}`;
+      return;
+    }
+    const left = res.headers.get("X-Plays-Left");
+    const audio = new Audio(URL.createObjectURL(await res.blob()));
+    window.rmAudio = audio;
+    state.textContent = left !== null ? T("plays_left", {n: left}) : "";
+    audio.onended = () => { if (left !== "0") btn.disabled = false; };
+    await audio.play();
+  } catch (e) { btn.disabled = false; state.textContent = e.message; }
+}
+
+async function togglePlacementRecording(i) {
+  const btn = document.getElementById(`plRec${i}`);
+  const st = document.getElementById(`plRecState${i}`);
+  if (rmRecorder && rmRecorder.state === "recording") { rmRecorder.stop(); return; }
+  try {
+    rmStream = await navigator.mediaDevices.getUserMedia({audio: true});
+  } catch (e) { rmToast(T("mic_error")); return; }
+  const preferred = "audio/webm;codecs=opus";
+  rmRecorder = new MediaRecorder(rmStream, MediaRecorder.isTypeSupported(preferred) ? {mimeType: preferred} : {});
+  rmChunks = [];
+  rmRecorder.ondataavailable = e => { if (e.data.size) rmChunks.push(e.data); };
+  let seconds = 60;
+  rmRecorder.onstop = async () => {
+    clearInterval(rmRecTimer);
+    rmStream.getTracks().forEach(t => t.stop());
+    btn.disabled = true;
+    st.textContent = T("uploading");
+    const fd = new FormData();
+    fd.append("audio", new Blob(rmChunks, {type: "audio/webm"}), "answer.webm");
+    await placementPost(`/api/placement/speaking/answer/${i}`, fd, true);
+  };
+  rmRecorder.start();
+  btn.textContent = T("stop");
+  btn.className = "btn btn-danger";
+  st.textContent = "60 s";
+  rmRecTimer = setInterval(() => {
+    seconds -= 1;
+    st.textContent = `${seconds} s`;
+    if (seconds <= 0 && rmRecorder.state === "recording") rmRecorder.stop();
+  }, 1000);
+}
+
+function renderRoadmapMap() {
+  const r = roadmapData;
+  const cur = r.current;
+  if (!roadmapSelected || !r.sublevels.includes(roadmapSelected)) roadmapSelected = cur;
+  const lv = r.levels || {};
+  const main = cur.slice(0, 2);
+  const skillsRow = r.skills.map(s => `<div class="col-6 col-md-4 col-xl-2"><div class="card-soft text-center h-100">
+      <div class="small text-secondary">${RM_SKILL_ICON[s]} ${esc(rmText(r.skill_names[s]))}</div>
+      <div class="fs-4 fw-bold">${esc(lv[s] || "—")}</div>${lv[s] ? "" : `<div class="small text-secondary">${esc(T("not_measured"))}</div>`}</div></div>`).join("");
+  const ladder = r.sublevels.map(sub => {
+    const pr = r.progress[sub];
+    const cls = sub === cur ? "rm-step current" : sub === r.next ? "rm-step next" : (r.sublevels.indexOf(sub) < r.sublevels.indexOf(cur) ? "rm-step done" : "rm-step");
+    const tag = sub === cur ? T("current_tag") : sub === r.next ? T("next_tag") : "";
+    return `<button class="${cls} ${sub === roadmapSelected ? "selected" : ""}" onclick="roadmapSelected='${sub}';renderRoadmapMap()">
+        <div class="fw-bold">${sub}</div><div class="rm-bar"><div style="width:${pr.percent}%"></div></div>
+        <div class="small">${pr.percent}%</div>${tag ? `<div class="rm-tag">${esc(tag)}</div>` : ""}</button>`;
+  }).join("");
+  const status = r.status || {};
+  const items = r.items.filter(it => it.sub === roadmapSelected);
+  const list = r.skills.map(skill => {
+    const its = items.filter(it => it.skill === skill);
+    if (!its.length) return "";
+    return `<div class="mb-3"><div class="fw-semibold mb-1">${RM_SKILL_ICON[skill]} ${esc(rmText(r.skill_names[skill]))}</div>
+      ${its.map(it => {
+        const st = status[it.id] || {};
+        const icon = st.status === "confirmed" ? "✅" : st.status === "practised" ? "◐" : "○";
+        const label = st.status === "confirmed" ? `${T("st_confirmed")}${st.source === "placement" ? " " + T("by_test") : st.score != null ? ` · ${st.score}%` : ""}`
+          : st.status === "practised" ? `${T("st_practised")}${st.score != null ? ` · ${st.score}%` : ""}` : T("st_new");
+        return `<div class="rm-item d-flex justify-content-between align-items-center gap-2">
+          <div><span class="me-2">${icon}</span>${esc(rmText(it.text))}<div class="small text-secondary ms-4">${esc(label)}</div></div>
+          <button class="btn btn-sm ${st.status === "confirmed" ? "btn-outline-secondary" : "btn-outline-primary"}" onclick="launchRoadmapItem('${it.id}')">${esc(T("train"))}</button></div>`;
+      }).join("")}</div>`;
+  }).join("");
+  const ib = r.ielts || {};
+  const ielts = `<div class="card-soft h-100"><h5>🎯 ${esc(T("ielts_title"))}</h5>
+      ${ib.estimate ? `<div class="fs-4 fw-bold">${esc(T("ielts_est", {b: ib.estimate}))}</div>` : `<p>${esc(T("ielts_early"))}</p>`}
+      <p class="small mb-1">${esc(T("ielts_hint"))}</p>
+      ${ib.current_band != null ? `<p class="small mb-1">${esc(T("ielts_current", {b: Number(ib.current_band).toFixed(1)}))}</p>` : ""}
+      <p class="small text-secondary">${esc(T("ielts_note"))}</p>
+      ${r.sublevels.indexOf(cur) >= r.sublevels.indexOf("B1.2") ? `<button class="btn btn-sm btn-outline-primary" onclick="openPage('ielts-dashboard')">${esc(T("ielts_open"))}</button>` : ""}</div>`;
+  const pr = r.progress[cur];
+  document.getElementById("roadmapRoot").innerHTML = `
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+      <h2 class="mb-0">${esc(T("title"))}</h2>
+      <button class="btn btn-sm btn-outline-secondary" onclick="if(confirm(T('retake_confirm'))) startPlacement()">${esc(T("retake"))}</button></div>
+    <div class="row g-3 mb-3">
+      <div class="col-lg-8"><div class="card-soft h-100"><div class="small text-secondary">${esc(T("your_level"))}</div>
+        <div class="d-flex align-items-baseline gap-3 flex-wrap"><div class="rm-level">${esc(cur)}</div>
+          <div>${esc(rmText(r.level_summary[main]))}</div></div>
+        <div class="small mt-2">${esc(T("progress_line", {p: pr.percent, s: cur}))}</div>
+        <div class="progress mt-1" style="height:8px"><div class="progress-bar" style="width:${pr.percent}%"></div></div></div></div>
+      <div class="col-lg-4">${ielts}</div></div>
+    <div class="row g-2 mb-3">${skillsRow}</div>
+    ${placementResultsHTML()}
+    <div class="card-soft"><h5>${esc(T("map_title"))}</h5><div class="small text-secondary mb-2">${esc(T("map_hint"))}</div>
+      <div class="rm-ladder mb-3">${ladder}</div>
+      <h5>${esc(roadmapSelected)} · <span class="fw-normal">${esc(rmText(r.level_summary[roadmapSelected.slice(0, 2)]))}</span></h5>
+      ${list}</div>`;
+}
+
+function placementResultsHTML() {
+  const p = placementState || {};
+  if (p.stage !== "done" || !p.parts) return "";
+  const rows = ["grammar", "vocabulary", "reading", "listening", "writing", "speaking"].map(k => {
+    const part = p.parts[k] || {};
+    const fb = part.feedback || {};
+    const val = part.sub || (part.status === "skipped" ? T("skipped") : part.status === "error" ? T("error") : "—");
+    const extra = [fb.comment, ...(fb.strengths || []).map(x => "+ " + x), ...(fb.improve || []).map(x => "→ " + x)].filter(Boolean);
+    return `<div class="py-1 border-bottom"><strong>${RM_SKILL_ICON[k]} ${esc(rmText(roadmapData.skill_names[k]))}: ${esc(val)}</strong>
+      ${part.percent != null ? ` <span class="small text-secondary">(${esc(part.percent)}%)</span>` : ""}
+      ${extra.length ? `<div class="small text-secondary">${extra.map(esc).join("<br>")}</div>` : ""}</div>`;
+  }).join("");
+  return `<details class="card-soft mb-3"><summary class="fw-semibold">${esc(T("test_results"))}</summary><div class="mt-2">${rows}</div></details>`;
+}
+
+const RM_MODULE_PAGE = {test: "test", vocabulary: "vocabulary", listening: "listening", writing: "writing", speaking: "speaking"};
+
+function rmSelect(id, value, label) {
+  const sel = document.getElementById(id);
+  if (!sel) return;
+  if (![...sel.options].some(o => o.value === value)) sel.add(new Option(label || value, value));
+  sel.value = value;
+}
+
+function launchRoadmapItem(itemId) {
+  const it = roadmapData.items.find(x => x.id === itemId);
+  if (!it) return;
+  const a = it.action;
+  const level = it.sub.slice(0, 2);
+  roadmapContext = {item_id: it.id, module: a.module, level, text: it.text, action: a};
+  openPage(RM_MODULE_PAGE[a.module]);
+  if (a.module === "test") {
+    rmSelect("testLevel", level);
+    rmSelect("testFocus", a.focus, `🧭 ${a.focus}`);
+    generateTest();
+  } else if (a.module === "vocabulary") {
+    rmSelect("vocabLevel", level);
+    document.getElementById("vocabTopic").value = a.topic;
+    makeVocab();
+  } else if (a.module === "listening") {
+    rmSelect("listeningLevel", level);
+    rmSelect("listeningFormat", a.format);
+    document.getElementById("listeningTopic").value = a.topic || "";
+    generateListening();
+  } else if (a.module === "writing") {
+    rmSelect("writingPurpose", a.purpose);
+    document.getElementById("writingText").value = "";
+    document.getElementById("writingText").placeholder = a.task;
+  } else if (a.module === "speaking") {
+    rmSelect("scenario", a.scenario);
+  }
+}
+
+function renderRoadmapTaskBanner(page) {
+  document.querySelectorAll(".rm-task-banner").forEach(el => el.remove());
+  if (!roadmapContext || RM_MODULE_PAGE[roadmapContext.module] !== page) return;
+  const a = roadmapContext.action;
+  const extra = a.module === "writing" ? `<div class="mt-1"><strong>${esc(T("task_label"))}:</strong> ${esc(a.task)}</div>`
+    : a.module === "vocabulary" ? `<div class="small mt-1">${esc(T("vocab_task"))}</div>`
+    : a.module === "speaking" ? `<div class="small mt-1">${esc(T("speaking_task"))} <strong>${esc(a.scenario)}</strong></div>` : "";
+  document.getElementById(`page-${page}`).insertAdjacentHTML("afterbegin",
+    `<div class="alert alert-primary rm-task-banner d-flex justify-content-between align-items-start gap-2">
+      <div><strong>🧭 ${esc(T("task_from_path"))} · ${esc(roadmapContext.level)}:</strong> ${esc(rmText(roadmapContext.text))}${extra}</div>
+      <button class="btn btn-sm btn-light" onclick="roadmapContext=null;openPage('roadmap')">${esc(T("back_to_path"))}</button></div>`);
+}
+
+async function roadmapReport(module, score, level) {
+  if (!roadmapContext || roadmapContext.module !== module) return;
+  const ctx = roadmapContext;
+  roadmapContext = null;
+  try {
+    const r = await api("/api/roadmap/evidence", {method: "POST", body: JSON.stringify({item_id: ctx.item_id, module, score, level: level || null})});
+    rmToast(r.confirmed ? `${T("toast_confirmed")}: ${rmText(ctx.text)}` : T("toast_practised", {l: ctx.level}));
+  } catch (e) { rmToast(e.message); }
 }
