@@ -28,6 +28,7 @@ from app.services.ielts_scoring import overall_band as ielts_overall_band, writi
 from app.services import ielts_exam, ielts_speaking, ielts_pronunciation, ielts_bank, storage_cleanup
 from app.services.ielts_scoring import criteria_band as ielts_criteria_band
 import threading
+from app.agents import ielts_coach
 from app.agents.ielts_agent import (
     generate_writing_prompt as ielts_generate_writing_prompt,
     assess_writing as ielts_assess_writing,
@@ -1124,6 +1125,52 @@ def ielts_writing_assess(payload: IELTSWritingAssessPayload, user=Depends(requir
     return result  # IELTS stays separate from the general (CEFR) progress
 
 
+class IELTSImprovePayload(BaseModel):
+    kind: Literal["writing", "speaking"] = "writing"
+    prompt: str = Field(min_length=1, max_length=6000)
+    text: str = Field(min_length=1, max_length=12000)
+    band: float | None = None
+    test_type: str = "Academic"
+    task_number: int = 2
+    chart: dict | None = None
+
+
+class IELTSVocabularyAddPayload(BaseModel):
+    items: list[dict] = Field(default_factory=list, max_length=20)
+    level: str | None = None
+
+
+@router.post("/ielts/improve")
+def ielts_improve(payload: IELTSImprovePayload, user=Depends(require_user)):
+    """Band 9 model answer + the learner's text rewritten one band higher + words and grammar to study."""
+    try:
+        return ielts_coach.improve(payload.kind, payload.prompt, payload.text, payload.band,
+                                   _feedback_lang(user["id"]), payload.test_type, payload.task_number, payload.chart)
+    except Exception:
+        logger.exception("IELTS improve failed")
+        raise HTTPException(status_code=503, detail=f"{AI_DOWN} Try again in a few minutes.")
+
+
+@router.post("/ielts/vocabulary/add")
+def ielts_vocabulary_add(payload: IELTSVocabularyAddPayload, user=Depends(require_user)):
+    """Words from IELTS feedback go to the learner's Vocabulary list (spaced review)."""
+    ensure_profile(user["id"], user.get("email"))
+    level = _clean_level(payload.level)
+    added = []
+    for item in payload.items:
+        word = str(item.get("word") or "").strip()[:80]
+        if not word:
+            continue
+        admin_db().table("vocabulary_words").upsert({
+            "user_id": user["id"], "word": word,
+            "part_of_speech": item.get("part_of_speech"), "definition": item.get("definition"),
+            "example_sentence": item.get("example"), "collocation": item.get("collocation"),
+            "topic": "IELTS feedback", "cefr_level": level, "status": "learning",
+        }, on_conflict="user_id,word").execute()
+        added.append(word)
+    return {"added": added}
+
+
 @router.post("/ielts/speaking/generate")
 def ielts_speaking_generate(payload: IELTSSpeakingGeneratePayload, user=Depends(require_user)):
     ensure_ielts_profile(user["id"])
@@ -1340,6 +1387,7 @@ def ielts_speaking_session_assess(session_id: str, user=Depends(require_user)):
         _practice_session_save(session_id, content)
         raise unavailable
     result["transcript"] = transcript
+    result["prompt"] = prompt  # used by "Learn from this answer"
     _speaking_add_pronunciation(session, result, [part], lang)
     save_ielts_speaking(user["id"], part, prompt, transcript, result)
     content["result"] = result
@@ -2059,6 +2107,10 @@ def _mock_review(user: dict, mock_id: str) -> dict:
                 "transcript": (row.get("content") or {}).get("audio_script") if section == "listening"
                               else ((row.get("answers") or {}).get("transcript") if section == "speaking" else None),
             }
+            if section == "writing":  # for "Learn from this answer" in the results
+                review[section][str(p)].update(prompt=(row.get("content") or {}).get("prompt"),
+                                               response=(row.get("answers") or {}).get("response"),
+                                               chart=(row.get("content") or {}).get("chart"))
     return review
 
 

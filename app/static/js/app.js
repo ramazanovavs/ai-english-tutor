@@ -878,7 +878,11 @@ async function assessIELTSWriting() {
       <h6>Strengths</h6><ul>${(d.strengths||[]).map(x=>`<li>${esc(x)}</li>`).join("")}</ul>
       <h6>How to improve</h6>${(d.improvements||[]).map(x=>`<div class="mb-2"><strong>${esc(x.criterion)}:</strong> ${esc(x.issue)}<br><span class="text-secondary">Action: ${esc(x.action)}</span></div>`).join("")}
       <h6 class="mt-3">Language corrections</h6>${(d.error_examples||[]).map(x=>`<div class="mb-2"><code>${esc(x.original)}</code> → <strong>${esc(x.correction)}</strong><br><small>${esc(x.explanation)}</small></div>`).join("") || '<p class="text-secondary">No major examples returned.</p>'}
-      <div class="alert alert-light mt-3"><strong>Next task:</strong> ${esc(d.next_task)}</div>`;
+      <div class="alert alert-light mt-3"><strong>Next task:</strong> ${esc(d.next_task)}</div>
+      ${learnPanelHTML("writing")}`;
+    ieltsLearnSource.writing = {kind:"writing", prompt, text: response, band: d.overall_band,
+      test_type: document.getElementById("ieltsWritingType").value, task_number: task, chart: currentIELTSWriting?.chart || null,
+      grammar: (d.error_examples || []).map(x => x.original).filter(Boolean)};
     await loadIELTSDashboard();
   } catch(e) { document.getElementById("ieltsWritingResult").textContent = e.message; }
 }
@@ -907,7 +911,11 @@ async function assessIELTSSpeakingSession(sessionId) {
       <h6>Improve</h6>${(d.improvements || []).map(x => `<div class="mb-2"><strong>${esc(x.criterion)}:</strong> ${esc(x.issue)}<br><span class="text-secondary">${esc(x.action)}</span></div>`).join("")}
       ${pronunciationFeedbackHTML(d.pronunciation_feedback)}
       ${(d.better_phrasing || []).length ? `<h6 class="mt-3">Better phrasing</h6>${d.better_phrasing.map(x => `<div class="mb-1"><code>${esc(x.original)}</code> → <strong>${esc(x.improved)}</strong></div>`).join("")}` : ""}
-      <details class="mt-3"><summary>Transcript of the conversation</summary><div class="small mt-2" style="white-space:pre-line">${esc(d.transcript || "")}</div></details>`;
+      <details class="mt-3"><summary>Transcript of the conversation</summary><div class="small mt-2" style="white-space:pre-line">${esc(d.transcript || "")}</div></details>
+      ${d.prompt ? learnPanelHTML("speaking") : ""}`;
+    ieltsLearnSource.speaking = {kind:"speaking", prompt: d.prompt || "", text: d.transcript || "",
+      band: d.speaking_band ?? d.provisional_language_band,
+      grammar: (d.better_phrasing || []).map(x => x.original).filter(Boolean)};
     await loadIELTSDashboard();
 }
 
@@ -1679,8 +1687,13 @@ async function finishFullIELTSMock() {
       <div class="card-soft mb-3"><h5>Writing</h5>
         ${[1, 2].map(n => {
           const r = w[String(n)]?.result || {};
+          const wt = w[String(n)] || {};
+          if (wt.prompt && String(wt.response || "").trim().split(/\s+/).length >= 20)
+            ieltsLearnSource[`mock${n}`] = {kind: "writing", prompt: wt.prompt, text: wt.response, band: r.overall_band,
+              test_type: fullMock.test_type || "Academic", task_number: n, chart: wt.chart || null, grammar: (r.error_examples || []).map(x => x.original).filter(Boolean)};
           return `<details class="mb-2"><summary>Task ${n}: band ${esc(r.overall_band ?? "—")}</summary>
             <div class="small mt-2">${(r.improvements || []).map(x => `<div class="mb-1"><strong>${esc(x.criterion)}:</strong> ${esc(x.issue)} — <span class="text-secondary">${esc(x.action)}</span></div>`).join("")}</div>
+            ${ieltsLearnSource[`mock${n}`] ? learnPanelHTML(`mock${n}`) : ""}
           </details>`;
         }).join("")}
       </div>
@@ -2684,4 +2697,114 @@ function startIELTSDrill(section, type) {
 function clearIELTSDrill(section) {
   ieltsFocus[section] = null;
   renderIELTSFocusBanner(section);
+}
+
+// ========================= Learn from results: Band 9 model, "one band higher", Vocabulary / Grammar links =========================
+const ieltsLearnSource = {writing: null, speaking: null};
+const ieltsLearnResult = {writing: null, speaking: null};
+
+function learnPanelHTML(kind) {
+  return `<div class="card-soft mt-3"><div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <div><h6 class="mb-0">Learn from this answer</h6><div class="small text-secondary">A Band 9 model answer and your own answer rewritten one band higher, with every change highlighted.</div></div>
+      <button id="learnBtn-${kind}" class="btn btn-outline-primary" onclick="loadIELTSLearn('${kind}')">Show model answers</button></div>
+    <div id="learnBox-${kind}" class="mt-3"></div></div>`;
+}
+
+// Word-level diff (LCS): deleted words struck out, inserted words highlighted.
+function wordDiffHTML(before, after) {
+  const tok = s => String(s || "").match(/\s+|[^\s]+/g) || [];
+  const a = tok(before), b = tok(after);
+  if (a.length * b.length > 4e6) return esc(after);
+  const n = a.length, m = b.length;
+  const dp = Array.from({length: n + 1}, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  let i = 0, j = 0, out = "";
+  const del = t => /^\s+$/.test(t) ? "" : `<del class="diff-del">${esc(t)}</del> `;
+  const ins = t => /^\s+$/.test(t) ? esc(t) : `<ins class="diff-ins">${esc(t)}</ins>`;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { out += esc(a[i]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) out += del(a[i++]);
+    else out += ins(b[j++]);
+  }
+  while (i < n) out += del(a[i++]);
+  while (j < m) out += ins(b[j++]);
+  return out.replace(/\n/g, "<br>");
+}
+
+async function loadIELTSLearn(kind) {
+  const src = ieltsLearnSource[kind];
+  const box = document.getElementById(`learnBox-${kind}`);
+  const btn = document.getElementById(`learnBtn-${kind}`);
+  if (!src || !box) return;
+  btn.disabled = true;
+  box.innerHTML = `<div class="loader">Writing the model answers…</div>`;
+  try {
+    const d = await api("/api/ielts/improve", {method: "POST", body: JSON.stringify({
+      kind: src.kind, prompt: src.prompt, text: src.text, band: src.band,
+      test_type: src.test_type || "Academic", task_number: src.task_number || 2, chart: src.chart || null})});
+    ieltsLearnResult[kind] = d;
+    const grammarText = [...(src.grammar || []), ...(d.grammar_focus || []).map(g => g.example_from_text)].filter(Boolean);
+    box.innerHTML = `
+      <ul class="nav nav-tabs small" role="tablist">
+        <li class="nav-item"><button class="nav-link active" onclick="learnTab('${kind}','Up',this)" type="button">Your answer → Band ${esc(d.target_band)}</button></li>
+        <li class="nav-item"><button class="nav-link" onclick="learnTab('${kind}','Model',this)" type="button">Band 9 model</button></li>
+        <li class="nav-item"><button class="nav-link" onclick="learnTab('${kind}','Study',this)" type="button">Words &amp; grammar</button></li>
+      </ul>
+      <div class="border border-top-0 rounded-bottom p-3">
+        <div class="learn-pane" id="learnUp-${kind}">
+          <div class="small text-secondary mb-2"><del class="diff-del">removed</del> <ins class="diff-ins">added</ins> — your ideas are kept; only the language is raised to Band ${esc(d.target_band)}.</div>
+          <div class="learn-text">${wordDiffHTML(src.text, d.upgraded)}</div>
+          ${(d.changes || []).length ? `<h6 class="mt-3">Key changes</h6>${d.changes.map(c => `<div class="small mb-2"><code>${esc(c.original)}</code> → <strong>${esc(c.improved)}</strong><br><span class="text-secondary">${esc(c.why)}</span></div>`).join("")}` : ""}
+        </div>
+        <div class="learn-pane d-none" id="learnModel-${kind}">
+          <div class="learn-text">${esc(d.model_answer || "").replace(/\n/g, "<br>")}</div>
+          ${(d.model_notes || []).length ? `<h6 class="mt-3">Why this is Band 9</h6><ul class="small">${d.model_notes.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+        </div>
+        <div class="learn-pane d-none" id="learnStudy-${kind}">
+          ${(d.vocabulary || []).length ? `<h6>Words to learn</h6>${d.vocabulary.map(v => `<div class="vocab-item"><strong>${esc(v.word)}</strong> <span class="text-secondary">${esc(v.part_of_speech || "")}</span><br>${esc(v.definition || "")}<br><em>${esc(v.example || "")}</em></div>`).join("")}
+            <button class="btn btn-sm btn-primary mt-2" onclick="sendIELTSWordsToVocabulary('${kind}')">Add to Vocabulary and practise</button> <span id="learnVocabMsg-${kind}" class="small text-secondary"></span>` : ""}
+          ${(d.grammar_focus || []).length ? `<h6 class="mt-3">Grammar to work on</h6>${d.grammar_focus.map(g => `<div class="small mb-2"><strong>${esc(g.topic)}:</strong> ${esc(g.rule)}<br><code>${esc(g.example_from_text || "")}</code></div>`).join("")}` : ""}
+          ${grammarText.length ? `<button class="btn btn-sm btn-outline-primary" onclick="sendIELTSToGrammarCoach('${kind}')">Practise in Grammar Coach</button>` : ""}
+        </div>
+      </div>`;
+    ieltsLearnResult[kind].grammarText = grammarText;
+    btn.textContent = "Model answers ready";
+  } catch (e) {
+    btn.disabled = false;
+    box.innerHTML = `<div class="alert alert-warning">${esc(e.message)}</div>`;
+  }
+}
+
+async function sendIELTSWordsToVocabulary(kind) {
+  const d = ieltsLearnResult[kind];
+  const msg = document.getElementById(`learnVocabMsg-${kind}`);
+  if (!d?.vocabulary?.length) return;
+  const level = d.estimated_cefr || "B2";
+  try {
+    const r = await api("/api/ielts/vocabulary/add", {method: "POST", body: JSON.stringify({items: d.vocabulary, level})});
+    msg.textContent = `Added ${r.added.length} words to your Vocabulary list.`;
+  } catch (e) { msg.textContent = e.message; return; }
+  currentVocabSet = {topic: "IELTS feedback", level, items: d.vocabulary};
+  currentVocabPractice = null;
+  openPage("vocabulary");
+  document.getElementById("vocabTopic").value = "IELTS feedback";
+  document.getElementById("vocabResult").innerHTML = `<h4>IELTS feedback</h4>
+    ${d.vocabulary.map(x => `<div class="vocab-item"><strong>${esc(x.word)}</strong> <span class="text-secondary">${esc(x.part_of_speech || "")}</span><br>${esc(x.definition || "")}<br><em>${esc(x.example || "")}</em><br><small>Collocation: ${esc(x.collocation || "")}</small></div>`).join("")}
+    <div class="d-flex align-items-center gap-2 mt-3 flex-wrap">
+      ${d.vocabulary.length >= 4 ? `<button id="vocabPracticeBtn" class="btn btn-primary" onclick="startVocabPractice()">Start practice · 10 questions</button>` : `<span class="small text-secondary">Saved for review. Practice needs at least 4 words.</span>`}
+    </div><div id="vocabPracticeArea" class="mt-4"></div>`;
+}
+
+function sendIELTSToGrammarCoach(kind) {
+  const lines = ieltsLearnResult[kind]?.grammarText || [];
+  if (!lines.length) return;
+  openPage("grammar");
+  document.getElementById("grammarText").value = [...new Set(lines)].slice(0, 8).join("\n");
+  checkGrammar();
+}
+
+function learnTab(kind, name, btn) {
+  ["Up", "Model", "Study"].forEach(n => document.getElementById(`learn${n}-${kind}`)?.classList.toggle("d-none", n !== name));
+  btn.closest(".nav").querySelectorAll(".nav-link").forEach(b => b.classList.toggle("active", b === btn));
 }
