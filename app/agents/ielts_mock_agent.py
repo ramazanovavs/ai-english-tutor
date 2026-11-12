@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.services.openai_service import ask_json
 from app.agents.ielts_agent import EXAM_LEVEL
 from app.services.ielts_scoring import criterion, criteria_band
+from app.agents.ielts_visuals import CHART_SPEC, pick_type, clean_chart
 
 
 LISTENING_CONTEXTS = {
@@ -157,13 +158,29 @@ task1 (object), task2 (object).
 Each task object must contain:
 title, prompt, minimum_words, suggested_minutes.
 
-Academic Task 1: provide all chart/table/process/map information textually so it can be answered without an image.
 General Training Task 1: create a letter situation and include exactly three bullet-point requirements.
 Task 2: create a clear essay prompt based on a point of view, argument, or problem.
 Task 1 minimum 150 words / suggested 20 minutes.
 Task 2 minimum 250 words / suggested 40 minutes.
 """
-    return ask_json(instructions, f"Test type: {kind}\n{EXAM_LEVEL}")
+    if kind != "Academic":
+        return ask_json(instructions, f"Test type: {kind}\n{EXAM_LEVEL}")
+    visual = pick_type()
+    instructions += (
+        "\nAcademic Task 1: task1 must also contain " + CHART_SPEC +
+        f"\nThe visual type MUST be \"{visual}\". task1.prompt is the exam rubric only, e.g. "
+        "'The chart below shows ... Summarise the information by selecting and reporting the main features, "
+        "and make comparisons where relevant.' (adapt for a process or map); never list the data in the prompt."
+    )
+    last = None
+    for _ in range(2):
+        paper = ask_json(instructions, f"Test type: {kind}\n{EXAM_LEVEL}")
+        try:
+            paper["task1"]["chart"] = clean_chart((paper.get("task1") or {}).get("chart"))
+            return paper
+        except (ValueError, TypeError) as exc:
+            last = exc
+    raise ValueError(f"Could not create the Task 1 visual: {last}")
 
 
 def generate_full_speaking() -> dict:

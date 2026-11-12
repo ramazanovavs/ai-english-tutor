@@ -4,6 +4,7 @@ from typing import Any
 
 from app.services.openai_service import ask_json
 from app.services.ielts_scoring import criterion, criteria_band
+from app.agents.ielts_visuals import CHART_SPEC, pick_type, clean_chart, chart_as_text
 
 # One difficulty for every candidate, as in the real exam (no per-learner simplification).
 EXAM_LEVEL = (
@@ -20,17 +21,31 @@ def generate_writing_prompt(test_type: str, task_number: int) -> dict:
 You create original IELTS-style preparation tasks. Do not copy or closely imitate any published test item.
 Return JSON with exactly these keys:
 title, task_type, prompt, minimum_words, suggested_minutes, planning_questions (array of 3 strings), useful_language (array of 5 strings).
-For Academic Task 1 create a text-described chart/table/process/map scenario that can be answered without an image.
 For General Training Task 1 create a letter situation with three bullet requirements.
 For Task 2 create an essay prompt suitable for either test type.
 """
-    return ask_json(
-        instructions,
-        f"Test type: {test_type}\n{task_label}\n{EXAM_LEVEL}\nGenerate one original practice task.",
-    )
+    request = f"Test type: {test_type}\n{task_label}\n{EXAM_LEVEL}\nGenerate one original practice task."
+    if test_type == "Academic" and task_number == 1:
+        kind = pick_type()
+        instructions += (
+            "\nAcademic Task 1: also return " + CHART_SPEC +
+            f"\nThe visual type MUST be \"{kind}\". The prompt is the exam rubric only, e.g. "
+            "'The chart below shows ... Summarise the information by selecting and reporting the main features, "
+            "and make comparisons where relevant.' (for a process or map adapt the wording); never list the data in prompt."
+        )
+        last = None
+        for _ in range(2):
+            data = ask_json(instructions, request)
+            try:
+                data["chart"] = clean_chart(data.get("chart"))
+                return data
+            except ValueError as exc:
+                last = exc
+        raise last
+    return ask_json(instructions, request)
 
 
-def assess_writing(test_type: str, task_number: int, prompt: str, response: str) -> dict:
+def assess_writing(test_type: str, task_number: int, prompt: str, response: str, chart: dict | None = None) -> dict:
     criterion_key = "task_achievement" if task_number == 1 else "task_response"
     instructions = f"""
 You are an IELTS preparation writing coach. This is formative AI feedback, NOT an official IELTS score.
@@ -51,7 +66,8 @@ Task 1 should normally be at least 150 words; Task 2 at least 250 words. Treat l
 """
     data = ask_json(
         instructions,
-        f"Test type: {test_type}\nTask number: {task_number}\nPrompt:\n{prompt}\n\nLearner response:\n{response}",
+        f"Test type: {test_type}\nTask number: {task_number}\nPrompt:\n{prompt}{chart_as_text(chart)}"
+        f"\n\nLearner response:\n{response}",
     )
     keys = [criterion_key, "coherence_cohesion", "lexical_resource", "grammatical_range_accuracy"]
     for key in keys:

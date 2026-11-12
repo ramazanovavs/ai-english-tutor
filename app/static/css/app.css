@@ -132,3 +132,7 @@ pre.feedback { white-space: pre-wrap; font-family: inherit; margin: 0; }
 .mock-reading-passage, .mock-reading-questions { max-height: 72vh; overflow-y: auto; }
 .mock-writing { font-family: inherit; line-height: 1.6; }
 .mock-answer { max-width: 22rem; }
+
+/* Academic Writing Task 1 visuals */
+.t1-visual { background: #fff; border: 1px solid #e6e6ef; border-radius: 10px; padding: 12px; }
+.t1-svg { width: 100%; height: auto; font-family: system-ui, sans-serif; }

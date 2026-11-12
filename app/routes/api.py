@@ -1003,6 +1003,7 @@ class IELTSWritingAssessPayload(BaseModel):
     task_number: int = Field(default=2, ge=1, le=2)
     prompt: str = Field(min_length=5, max_length=8000)
     response: str = Field(min_length=20, max_length=20000)
+    chart: dict | None = None  # Academic Task 1 visual data
 
 
 class IELTSSpeakingGeneratePayload(BaseModel):
@@ -1049,7 +1050,8 @@ def ielts_writing_generate(payload: IELTSWritingPromptPayload, user=Depends(requ
 @router.post("/ielts/writing/assess")
 def ielts_writing_assess(payload: IELTSWritingAssessPayload, user=Depends(require_user)):
     ensure_ielts_profile(user["id"])
-    result = ielts_assess_writing(payload.test_type, payload.task_number, payload.prompt, payload.response)
+    result = ielts_assess_writing(payload.test_type, payload.task_number, payload.prompt, payload.response,
+                                  payload.chart)
     save_ielts_writing(user["id"], payload.test_type, payload.task_number, payload.prompt, payload.response, result)
     return result  # IELTS stays separate from the general (CEFR) progress
 
@@ -1317,7 +1319,8 @@ def _mock_assess_writing(user_id: str, mock_id: str, test_type: str) -> None:
         for task in (1, 2):
             row = mock_get_section(user_id, mock_id, "writing", task)
             text = str((row.get("answers") or {}).get("response") or "").strip()
-            results[task] = (ielts_assess_writing(test_type, task, row["content"]["prompt"], text)
+            results[task] = (ielts_assess_writing(test_type, task, row["content"]["prompt"], text,
+                                                  row["content"].get("chart"))
                              if len(text.split()) >= 20 else blank())
             mock_complete_section(user_id, mock_id, "writing", task, estimated_band=results[task]["overall_band"],
                                   result=results[task])

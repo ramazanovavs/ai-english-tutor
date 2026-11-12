@@ -841,6 +841,8 @@ async function generateIELTSWriting() {
     document.getElementById("ieltsWritingPromptBox").classList.remove("d-none");
     document.getElementById("ieltsWritingTitle").textContent = currentIELTSWriting.title || "IELTS Writing";
     document.getElementById("ieltsWritingPrompt").textContent = currentIELTSWriting.prompt || "";
+    document.getElementById("ieltsWritingChart").innerHTML = "";
+    if (currentIELTSWriting.chart) renderTask1Chart("ieltsWritingChart", currentIELTSWriting.chart);
     document.getElementById("ieltsWritingMeta").textContent = `Minimum ${currentIELTSWriting.minimum_words || (payload.task_number===1?150:250)} words · Suggested ${currentIELTSWriting.suggested_minutes || (payload.task_number===1?20:40)} minutes`;
     document.getElementById("ieltsWritingResult").innerHTML = "";
   } catch(e) { document.getElementById("ieltsWritingResult").textContent = e.message; }
@@ -856,7 +858,7 @@ async function assessIELTSWriting() {
   try {
     const d = await api("/api/ielts/writing/assess", {method:"POST", body:JSON.stringify({
       test_type: document.getElementById("ieltsWritingType").value,
-      task_number: task, prompt, response
+      task_number: task, prompt, response, chart: currentIELTSWriting?.chart || null
     })});
     const taskKey = task === 1 ? "task_achievement" : "task_response";
     document.getElementById("ieltsWritingResult").innerHTML = `
@@ -2056,4 +2058,148 @@ function renderListeningTranscript(script, details) {
     html += esc(text.slice(pos));
     return `<p class="mb-2"><strong>${esc(line.speaker)}:</strong> ${html}</p>`;
   }).join("");
+}
+
+
+/* ===================== IELTS Academic Writing Task 1 visuals (SVG) ===================== */
+
+const T1_COLORS = ["#3b5bdb", "#e8590c", "#2b8a3e", "#ae3ec9", "#1098ad", "#f08c00"];
+
+function t1Nice(max) {
+  if (max <= 0) return {top: 1, step: 0.2};
+  const raw = max / 5, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw);
+  return {top: Math.ceil(max / step) * step, step};
+}
+
+function t1Num(v) { return Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100); }
+
+function t1Legend(series, x, y) {
+  return series.map((s, i) => `<rect x="${x + i * 140}" y="${y - 9}" width="12" height="12" fill="${T1_COLORS[i % 6]}"/>
+    <text x="${x + i * 140 + 17}" y="${y + 1}" font-size="12">${esc(s.name)}</text>`).join("");
+}
+
+function t1Axes(c, W, H, L, B, T) {
+  const max = Math.max(0, ...c.series.flatMap(s => s.values));
+  const {top, step} = t1Nice(max);
+  let g = "";
+  for (let v = 0; v <= top + 1e-9; v += step) {
+    const y = H - B - (v / top) * (H - B - T);
+    g += `<line x1="${L}" x2="${W - 15}" y1="${y}" y2="${y}" stroke="#e5e5e5"/>
+          <text x="${L - 6}" y="${y + 4}" font-size="11" text-anchor="end">${t1Num(Math.round(v * 100) / 100)}</text>`;
+  }
+  g += `<line x1="${L}" x2="${L}" y1="${T}" y2="${H - B}" stroke="#333"/><line x1="${L}" x2="${W - 15}" y1="${H - B}" y2="${H - B}" stroke="#333"/>`;
+  if (c.y_label) g += `<text transform="translate(14 ${(H - B + T) / 2}) rotate(-90)" font-size="12" text-anchor="middle">${esc(c.y_label)}</text>`;
+  if (c.x_label) g += `<text x="${(L + W) / 2}" y="${H - 6}" font-size="12" text-anchor="middle">${esc(c.x_label)}</text>`;
+  return {g, top};
+}
+
+function t1Bar(c) {
+  const W = 680, H = 400, L = 62, B = 58, T = 40;
+  const {g, top} = t1Axes(c, W, H, L, B, T);
+  const n = c.categories.length, k = c.series.length, slot = (W - 15 - L) / n, bw = Math.min(34, (slot * 0.75) / k);
+  let bars = "";
+  c.categories.forEach((cat, i) => {
+    const x0 = L + i * slot + (slot - bw * k) / 2;
+    c.series.forEach((s, j) => {
+      const h = (s.values[i] / top) * (H - B - T);
+      bars += `<rect x="${x0 + j * bw}" y="${H - B - h}" width="${bw - 2}" height="${h}" fill="${T1_COLORS[j % 6]}"><title>${esc(s.name)}: ${t1Num(s.values[i])}</title></rect>`;
+    });
+    bars += `<text x="${L + i * slot + slot / 2}" y="${H - B + 16}" font-size="11" text-anchor="middle">${esc(cat)}</text>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" class="t1-svg">${g}${bars}${t1Legend(c.series, L, 22)}</svg>`;
+}
+
+function t1Line(c) {
+  const W = 680, H = 400, L = 62, B = 58, T = 40;
+  const {g, top} = t1Axes(c, W, H, L, B, T);
+  const n = c.categories.length, xs = i => L + 20 + i * ((W - 50 - L) / Math.max(1, n - 1));
+  let lines = c.categories.map((cat, i) => `<text x="${xs(i)}" y="${H - B + 16}" font-size="11" text-anchor="middle">${esc(cat)}</text>`).join("");
+  c.series.forEach((s, j) => {
+    const pts = s.values.map((v, i) => `${xs(i)},${H - B - (v / top) * (H - B - T)}`);
+    lines += `<polyline points="${pts.join(" ")}" fill="none" stroke="${T1_COLORS[j % 6]}" stroke-width="2.5"/>`;
+    lines += pts.map((p, i) => { const [x, y] = p.split(","); return `<circle cx="${x}" cy="${y}" r="3.5" fill="${T1_COLORS[j % 6]}"><title>${esc(s.name)} ${esc(c.categories[i])}: ${t1Num(s.values[i])}</title></circle>`; }).join("");
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" class="t1-svg">${g}${lines}${t1Legend(c.series, L, 22)}</svg>`;
+}
+
+function t1Pie(c) {
+  const k = c.series.length, W = 230 * k + 20, H = 300, r = 88;
+  let out = "";
+  c.series.forEach((s, j) => {
+    const cx = 125 + j * 230, cy = 150, total = s.values.reduce((a, b) => a + b, 0) || 1;
+    let a0 = -Math.PI / 2;
+    s.values.forEach((v, i) => {
+      const a1 = a0 + (v / total) * 2 * Math.PI, large = a1 - a0 > Math.PI ? 1 : 0;
+      const p = (a) => `${cx + r * Math.cos(a)},${cy + r * Math.sin(a)}`;
+      out += `<path d="M${cx},${cy} L${p(a0)} A${r},${r} 0 ${large} 1 ${p(a1)} Z" fill="${T1_COLORS[i % 6]}" stroke="#fff"><title>${esc(c.categories[i])}: ${t1Num(v)}%</title></path>`;
+      const mid = (a0 + a1) / 2;
+      if (v / total > 0.04) out += `<text x="${cx + r * 0.65 * Math.cos(mid)}" y="${cy + r * 0.65 * Math.sin(mid) + 4}" font-size="12" fill="#fff" font-weight="700" text-anchor="middle">${t1Num(v)}%</text>`;
+      a0 = a1;
+    });
+    out += `<text x="${cx}" y="${cy + r + 24}" font-size="13" font-weight="700" text-anchor="middle">${esc(s.name)}</text>`;
+  });
+  const legend = c.categories.map((cat, i) => `<span class="me-3 small"><span style="display:inline-block;width:11px;height:11px;background:${T1_COLORS[i % 6]}"></span> ${esc(cat)}</span>`).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" class="t1-svg" style="max-width:${W}px">${out}</svg><div>${legend}</div>`;
+}
+
+function t1Table(c) {
+  return `<div class="table-responsive"><table class="table table-bordered table-sm text-center mb-1">
+    <thead class="table-light"><tr>${c.columns.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead>
+    <tbody>${c.rows.map(r => `<tr>${r.map((x, i) => i ? `<td>${esc(x)}</td>` : `<th class="text-start">${esc(x)}</th>`).join("")}</tr>`).join("")}</tbody>
+  </table></div>${c.unit ? `<div class="small text-secondary">${esc(c.unit)}</div>` : ""}`;
+}
+
+function t1Process(c) {
+  const perRow = 4, bw = 140, bh = 66, gx = 34, gy = 40, n = c.steps.length;
+  const rows = Math.ceil(n / perRow), W = perRow * bw + (perRow - 1) * gx + 20, H = rows * bh + (rows - 1) * gy + (c.cycle ? 50 : 20);
+  const pos = i => {
+    const r = Math.floor(i / perRow), k = i % perRow, col = r % 2 ? perRow - 1 - k : k;  // snake layout
+    return {x: 10 + col * (bw + gx), y: 10 + r * (bh + gy)};
+  };
+  const wrap = t => { const words = t.split(" "), lines = [""]; words.forEach(w => { if ((lines.at(-1) + " " + w).trim().length > 19) lines.push(w); else lines[lines.length - 1] = (lines.at(-1) + " " + w).trim(); }); return lines.slice(0, 3); };
+  let out = `<defs><marker id="t1arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#555"/></marker></defs>`;
+  c.steps.forEach((s, i) => {
+    const {x, y} = pos(i);
+    out += `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" rx="8" fill="#eef1ff" stroke="#5b5bd6"/>
+      <circle cx="${x + 12}" cy="${y + 12}" r="9" fill="#5b5bd6"/><text x="${x + 12}" y="${y + 16}" font-size="11" fill="#fff" text-anchor="middle">${i + 1}</text>
+      ${wrap(s).map((l, j) => `<text x="${x + bw / 2 + 6}" y="${y + 26 + j * 15}" font-size="12" text-anchor="middle">${esc(l)}</text>`).join("")}`;
+    if (i < n - 1) {
+      const a = pos(i), b = pos(i + 1);
+      const [x1, y1, x2, y2] = a.y === b.y
+        ? (b.x > a.x ? [a.x + bw, a.y + bh / 2, b.x - 2, b.y + bh / 2] : [a.x, a.y + bh / 2, b.x + bw + 2, b.y + bh / 2])
+        : [a.x + bw / 2, a.y + bh, b.x + bw / 2, b.y - 2];
+      out += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#555" stroke-width="2" marker-end="url(#t1arrow)"/>`;
+    }
+  });
+  if (c.cycle) out += `<text x="${W / 2}" y="${H - 12}" font-size="12" text-anchor="middle" fill="#555">↻ After step ${n} the process returns to step 1</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" class="t1-svg">${out}</svg>`;
+}
+
+function t1Map(c) {
+  const cell = 30, size = cell * 10, W = size * 2 + 70, H = size + 50;
+  const fills = {};
+  let k = 0;
+  c.panels.forEach(p => p.features.forEach(f => { if (!(f.label in fills)) fills[f.label] = ["#d0ebff", "#d3f9d8", "#fff3bf", "#ffe3e3", "#e5dbff", "#c5f6fa", "#ffe8cc", "#f1f3f5"][k++ % 8]; }));
+  let out = "";
+  c.panels.forEach((p, j) => {
+    const ox = 10 + j * (size + 50), oy = 30;
+    out += `<text x="${ox + size / 2}" y="20" font-size="14" font-weight="700" text-anchor="middle">${esc(p.title)}</text>
+      <rect x="${ox}" y="${oy}" width="${size}" height="${size}" fill="#fafafa" stroke="#333"/>`;
+    p.features.forEach(f => {
+      const x = ox + f.x * cell, y = oy + f.y * cell, w = f.w * cell, h = f.h * cell;
+      out += `<rect x="${x + 1}" y="${y + 1}" width="${w - 2}" height="${h - 2}" fill="${fills[f.label]}" stroke="#666"/>
+        <text x="${x + w / 2}" y="${y + h / 2 + 4}" font-size="${w < 60 ? 9 : 11}" text-anchor="middle">${esc(f.label)}</text>`;
+    });
+    out += `<text x="${ox + size - 12}" y="${oy + 18}" font-size="12" font-weight="700">N</text><line x1="${ox + size - 8}" y1="${oy + 34}" x2="${ox + size - 8}" y2="${oy + 22}" stroke="#333" stroke-width="2"/>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" class="t1-svg">${out}</svg>`;
+}
+
+function renderTask1Chart(containerId, chart) {
+  const el = document.getElementById(containerId);
+  if (!el || !chart) return;
+  const draw = {bar: t1Bar, line: t1Line, pie: t1Pie, table: t1Table, process: t1Process, map: t1Map}[chart.type];
+  el.innerHTML = `<div class="t1-visual">${chart.title ? `<div class="fw-semibold text-center mb-2">${esc(chart.title)}</div>` : ""}
+    ${draw ? draw(chart) : ""}</div>`;
 }
