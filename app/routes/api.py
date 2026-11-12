@@ -20,7 +20,7 @@ from app.agents.grammar_agent import analyze as grammar_analyze
 from app.agents.writing_agent import analyze as writing_analyze
 from app.agents.vocabulary_agent import create_set, create_practice
 from app.agents import listening_agent
-from app.services import listening_audio, listening_bank, ielts_analytics, placement, roadmap as roadmap_store
+from app.services import listening_audio, listening_bank, ielts_analytics, placement, roadmap as roadmap_store, review
 from app.config import get_settings
 from app.agents.assessment_agent import generate as generate_test
 from app.services.openai_service import ask_text, ask_json, transcribe_audio, synthesize_speech
@@ -210,6 +210,7 @@ def grammar(payload: TextPayload, user=Depends(require_user)):
     context = get_student_context(user["id"])
     level = context.get("profile", {}).get("cefr_level") or "not assessed"
     result = grammar_analyze(payload.text, level)
+    review.save_errors(user["id"], result.get("errors"), payload.text, "grammar")  # -> "My mistakes"
     score = int(result.get("score", 0))
     estimated_level = result.get("estimated_level")
     record_activity(
@@ -250,6 +251,7 @@ def writing(payload: WritingPayload, user=Depends(require_user)):
 
     score = _clean_score(result.get("score"))
     estimated_level = _clean_level(result.get("estimated_level"))
+    review.save_errors(user["id"], result.get("errors"), payload.text, "writing")  # -> "My mistakes"
     result["score"] = score
     result["estimated_level"] = estimated_level or result.get("estimated_level")
 
@@ -1130,6 +1132,7 @@ def ielts_writing_assess(payload: IELTSWritingAssessPayload, user=Depends(requir
         raise HTTPException(status_code=503, detail=f"{AI_DOWN} Your text is still on the page — "
                                                     "press Assess again in a few minutes.")
     save_ielts_writing(user["id"], payload.test_type, payload.task_number, payload.prompt, payload.response, result)
+    review.save_errors(user["id"], result.get("error_examples"), payload.response, "IELTS writing")
     return result  # IELTS stays separate from the general (CEFR) progress
 
 
@@ -2327,3 +2330,57 @@ async def placement_speaking_answer(index: int, audio: UploadFile = File(...), u
 def placement_speaking_submit(payload: PlacementSpeakingDonePayload, user=Depends(require_user)):
     _placement_call(placement.submit_speaking, user["id"], payload.skip)
     return placement.public_state(user["id"])
+
+
+# ========================= REVIEW: words (spaced repetition), my mistakes, today =========================
+
+class WordReviewPayload(BaseModel):
+    quality: int = Field(ge=0, le=5)
+
+
+class MistakesSubmitPayload(BaseModel):
+    test_id: str
+    answers: dict[str, str] = Field(default_factory=dict)
+
+
+@router.get("/today")
+def today_plan(user=Depends(require_user)):
+    return review.today(user["id"])
+
+
+@router.get("/review/words")
+def review_words(user=Depends(require_user)):
+    words, due = review.due_words(user["id"], limit=20)
+    return {"words": words, "due": due}
+
+
+@router.post("/review/words/{word_id}")
+def review_word(word_id: str, payload: WordReviewPayload, user=Depends(require_user)):
+    try:
+        return review.review_word(user["id"], word_id, payload.quality)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Word not found.")
+
+
+@router.get("/mistakes")
+def mistakes_list(user=Depends(require_user)):
+    return review.mistakes(user["id"])
+
+
+@router.post("/mistakes/practice")
+def mistakes_practice(user=Depends(require_user)):
+    try:
+        return review.mistakes_practice(user["id"], _feedback_lang(user["id"]))
+    except LookupError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception:
+        logger.exception("Mistakes practice failed")
+        raise HTTPException(status_code=503, detail=f"{AI_DOWN} Try again in a few minutes.")
+
+
+@router.post("/mistakes/submit")
+def mistakes_submit(payload: MistakesSubmitPayload, user=Depends(require_user)):
+    try:
+        return review.submit_mistakes(user["id"], payload.test_id, payload.answers)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Practice not found.")

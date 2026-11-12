@@ -117,6 +117,7 @@ async function loadProfile() {
     currentProfile = await api("/api/me");
     renderDashboard();
     renderRoadmapDashCard();
+    loadToday();
   } catch (e) {
     alert(e.message);
   }
@@ -238,6 +239,7 @@ function openPage(name) {
   if (name === "listening") suggestListeningLevel();
   if (name !== "listening" && typeof stopListeningAudio === "function") stopListeningAudio();
   if (name === "roadmap") loadRoadmap();
+  if (name === "review") loadReview();
   if (typeof renderRoadmapTaskBanner === "function") renderRoadmapTaskBanner(name);
 }
 
@@ -402,6 +404,7 @@ async function checkGrammar() {
       <div class="alert alert-light"><strong>Corrected:</strong> ${esc(d.corrected_text)}</div>
       <h6>Errors</h6>
       ${(d.errors || []).map(x => `<div class="mb-2"><code>${esc(x.original)}</code> → <strong>${esc(x.correction)}</strong><br><span class="small">${esc(x.rule)}: ${esc(x.explanation)}</span></div>`).join("") || "<p>No major errors.</p>"}
+      ${(d.errors || []).length ? `<div class="small text-secondary">🔁 ${esc(T("saved_to_mistakes"))}</div>` : ""}
       <h6 class="mt-3">Mini-practice</h6>
       <ol>${(d.practice || []).map(x => `<li>${esc(x)}</li>`).join("")}</ol>`;
     await loadProfile();
@@ -616,6 +619,7 @@ async function checkWriting() {
       <h4>${esc(d.score)}% · approx. ${esc(d.estimated_level)}</h4>
       <h6>Strengths</h6><ul>${(d.strengths || []).map(x=>`<li>${esc(x)}</li>`).join("")}</ul>
       <h6>Improve</h6>${(d.improvements || []).map(x=>`<div class="mb-2"><strong>${esc(x.category)}:</strong> ${esc(x.issue)}<br><span class="text-secondary">${esc(x.suggestion)}</span></div>`).join("")}
+      ${(d.errors || []).length ? `<h6 class="mt-3">Errors</h6>${d.errors.map(x => `<div class="mb-1"><code>${esc(x.original)}</code> → <strong>${esc(x.correction)}</strong> <span class="small text-secondary">${esc(x.rule || "")}${x.explanation ? " — " + esc(x.explanation) : ""}</span></div>`).join("")}<div class="small text-secondary">🔁 ${esc(T("saved_to_mistakes"))}</div>` : ""}
       <h6 class="mt-3">Revised sample</h6><div class="alert alert-light">${esc(d.revised_sample)}</div>
       <strong>Next task:</strong> ${esc(d.next_task)}`;
     await loadProfile();
@@ -2903,6 +2907,42 @@ const RM_T = {
   skipped: {ru: "пропущено", kk: "өткізілді", en: "skipped"},
   error: {ru: "Ошибка", kk: "Қате", en: "Error"},
 };
+Object.assign(RM_T, {
+  menu_review: {ru: "🔁 Повторение", kk: "🔁 Қайталау", en: "🔁 Review"},
+  today: {ru: "Сегодня", kk: "Бүгін", en: "Today"},
+  today_done: {ru: "Выполнено {d} из {t}", kk: "{t} тапсырманың {d}-і орындалды", en: "{d} of {t} done"},
+  today_empty: {ru: "На сегодня всё сделано 🎉 Можно потренировать любое умение на карте.", kk: "Бүгінге бәрі орындалды 🎉 Картадағы кез келген дағдыны жаттықтыруға болады.", en: "All done for today 🎉 You can practise any skill on the map."},
+  t_placement: {ru: "Пройти входной тест", kk: "Кіріс тестін тапсыру", en: "Take the placement test"},
+  t_words: {ru: "Повторить слова: {n}", kk: "Сөздерді қайталау: {n}", en: "Review words: {n}"},
+  t_words_done: {ru: "Слова повторены ({n} сегодня)", kk: "Сөздер қайталанды (бүгін {n})", en: "Words reviewed ({n} today)"},
+  t_mistakes: {ru: "Исправить свои ошибки: {n}", kk: "Өз қателеріңді түзету: {n}", en: "Fix your mistakes: {n}"},
+  t_mistakes_done: {ru: "Ошибки отработаны ({n} исправлено сегодня)", kk: "Қателер пысықталды (бүгін {n} түзетілді)", en: "Mistakes practised ({n} fixed today)"},
+  t_skill: {ru: "Новое умение", kk: "Жаңа дағды", en: "New skill"},
+  minutes: {ru: "{n} мин", kk: "{n} мин", en: "{n} min"},
+  go: {ru: "Начать", kk: "Бастау", en: "Start"},
+  saved_to_mistakes: {ru: "Ошибки сохранены в «Мои ошибки» — завтра они вернутся в новых предложениях.", kk: "Қателер «Менің қателерім» бөліміне сақталды — ертең жаңа сөйлемдерде қайта келеді.", en: "Saved to “My mistakes” — they come back tomorrow in new sentences."},
+  tab_words: {ru: "Слова", kk: "Сөздер", en: "Words"},
+  tab_mistakes: {ru: "Мои ошибки", kk: "Менің қателерім", en: "My mistakes"},
+  words_none: {ru: "Сейчас слов на повторение нет. Новые слова приходят из Vocabulary и разборов IELTS; каждое возвращается тогда, когда его пора вспомнить.", kk: "Қазір қайталайтын сөз жоқ. Жаңа сөздер Vocabulary және IELTS талдауларынан келеді; әр сөз еске түсіретін уақыты келгенде қайтады.", en: "No words to review right now. New words come from Vocabulary and IELTS feedback; each one returns when it is time to recall it."},
+  words_hint: {ru: "Вспомните значение, затем откройте ответ и честно оцените себя: от оценки зависит, когда слово вернётся.", kk: "Мағынасын еске түсіріп, жауапты ашыңыз да, өзіңізді шынайы бағалаңыз: сөздің қашан қайтатыны осыған байланысты.", en: "Recall the meaning, then show the answer and rate yourself honestly — it decides when the word comes back."},
+  show_answer: {ru: "Показать ответ", kk: "Жауапты көрсету", en: "Show answer"},
+  q_forgot: {ru: "Не помню", kk: "Есімде жоқ", en: "Forgot"},
+  q_hard: {ru: "С трудом", kk: "Қиын болды", en: "Hard"},
+  q_good: {ru: "Помню", kk: "Есімде", en: "Good"},
+  q_easy: {ru: "Легко", kk: "Оңай", en: "Easy"},
+  word_n: {ru: "Слово {n} из {t}", kk: "{t} сөздің {n}-сі", en: "Word {n} of {t}"},
+  words_finished: {ru: "Готово: повторено {n} слов. Следующие вернутся по расписанию.", kk: "Дайын: {n} сөз қайталанды. Келесілері кесте бойынша қайтады.", en: "Done: {n} words reviewed. The next ones will come back on schedule."},
+  mistakes_intro: {ru: "Сюда собираются ошибки из Grammar Coach, Writing Coach и IELTS Writing. Через день они возвращаются в новых предложениях; правильно исправленная ошибка отмечается как отработанная.", kk: "Мұнда Grammar Coach, Writing Coach және IELTS Writing қателері жиналады. Бір күннен кейін олар жаңа сөйлемдерде қайтады; дұрыс түзетілген қате пысықталған деп белгіленеді.", en: "Errors from Grammar Coach, Writing Coach and IELTS Writing are collected here. A day later they come back in new sentences; a correctly fixed error is marked as done."},
+  mistakes_stats: {ru: "Открытых: {o} · готовы к тренировке: {d} · отработано: {r}", kk: "Ашық: {o} · жаттығуға дайын: {d} · пысықталған: {r}", en: "Open: {o} · ready to practise: {d} · fixed: {r}"},
+  practise_mistakes: {ru: "Тренировать ошибки", kk: "Қателерді жаттықтыру", en: "Practise my mistakes"},
+  mistakes_none: {ru: "Пока ошибок нет. Проверьте текст в Grammar Coach или Writing Coach — найденные ошибки появятся здесь.", kk: "Әзірге қате жоқ. Мәтінді Grammar Coach немесе Writing Coach арқылы тексеріңіз — табылған қателер осында шығады.", en: "No mistakes yet. Check a text in Grammar Coach or Writing Coach — the errors found will appear here."},
+  check: {ru: "Проверить", kk: "Тексеру", en: "Check"},
+  fill_gap: {ru: "Вставьте пропущенное (1–3 слова)", kk: "Бос орынды толтырыңыз (1–3 сөз)", en: "Fill the gap (1–3 words)"},
+  mistakes_result: {ru: "Исправлено {c} из {t}", kk: "{t}-тің {c}-і түзетілді", en: "{c} of {t} fixed"},
+  all_mistakes: {ru: "Все открытые ошибки", kk: "Барлық ашық қателер", en: "All open mistakes"},
+  correct_answer: {ru: "Правильно", kk: "Дұрысы", en: "Correct"},
+  mistakes_all_fixed: {ru: "Все ошибки отработаны 👍 Новые появятся после проверки текстов.", kk: "Барлық қателер пысықталды 👍 Жаңалары мәтіндерді тексергеннен кейін пайда болады.", en: "All mistakes fixed 👍 New ones appear after your texts are checked."},
+});
 const RM_SKILL_ICON = {grammar: "🧠", vocabulary: "🔤", reading: "📖", listening: "🎧", writing: "✍️", speaking: "🎙"};
 let roadmapData = null, placementState = null, placementTimer = null, roadmapSelected = null, roadmapContext = null;
 let rmRecorder = null, rmStream = null, rmChunks = [], rmRecTimer = null;
@@ -2928,6 +2968,8 @@ function applyUiLang() {
   if (sel) sel.value = uiLang();
   const menu = document.getElementById("menuRoadmap");
   if (menu) menu.textContent = T("menu");
+  const menuReview = document.getElementById("menuReview");
+  if (menuReview) menuReview.textContent = T("menu_review");
   const ielts = document.getElementById("ieltsFeedbackLang");
   if (ielts) ielts.value = uiLang();
 }
@@ -2939,7 +2981,9 @@ async function setUiLang(lang) {
   applyUiLang();
   try { await api("/api/profile/language", {method: "POST", body: JSON.stringify({language: lang})}); } catch (e) { rmToast(e.message); }
   renderRoadmapDashCard();
+  renderToday();
   if (!document.getElementById("page-roadmap").classList.contains("d-none")) renderRoadmapPage();
+  if (!document.getElementById("page-review").classList.contains("d-none")) renderReview();
   const page = document.querySelector(".page:not(.d-none)")?.id?.replace("page-", "");
   if (page) renderRoadmapTaskBanner(page);
 }
@@ -3288,7 +3332,8 @@ function rmSelect(id, value, label) {
 }
 
 function launchRoadmapItem(itemId) {
-  const it = roadmapData.items.find(x => x.id === itemId);
+  const it = (roadmapData?.items || []).find(x => x.id === itemId) ||
+    (todayData?.tasks || []).map(t => t.item).find(x => x && x.id === itemId);
   if (!it) return;
   const a = it.action;
   const level = it.sub.slice(0, 2);
@@ -3336,5 +3381,132 @@ async function roadmapReport(module, score, level) {
   try {
     const r = await api("/api/roadmap/evidence", {method: "POST", body: JSON.stringify({item_id: ctx.item_id, module, score, level: level || null})});
     rmToast(r.confirmed ? `${T("toast_confirmed")}: ${rmText(ctx.text)}` : T("toast_practised", {l: ctx.level}));
+  } catch (e) { rmToast(e.message); }
+}
+
+// ========================= Today, word review (spaced repetition) and my mistakes =========================
+let todayData = null, reviewTab = "words", reviewWords = null, reviewIndex = 0, reviewDone = 0, reviewFlipped = false;
+let mistakesData = null, mistakesPractice = null, mistakesResult = null;
+
+async function loadToday() {
+  try { todayData = await api("/api/today"); renderToday(); }
+  catch (e) { const box = document.getElementById("todayCard"); if (box) box.innerHTML = ""; }
+}
+
+function renderToday() {
+  const box = document.getElementById("todayCard");
+  if (!box || !todayData) return;
+  const rows = todayData.tasks.map(t => {
+    let title, action;
+    if (t.kind === "placement") { title = T("t_placement"); action = "openPage('roadmap')"; }
+    else if (t.kind === "words") { title = t.done ? T("t_words_done", {n: t.reviewed_today}) : T("t_words", {n: t.count}); action = "openReview('words')"; }
+    else if (t.kind === "mistakes") { title = t.done ? T("t_mistakes_done", {n: t.resolved_today}) : T("t_mistakes", {n: t.count}); action = "openReview('mistakes')"; }
+    else if (t.kind === "skill") { title = `${T("t_skill")} · ${t.item.sub}: ${rmText(t.item.text)}`; action = `launchRoadmapItem('${t.item.id}')`; }
+    return `<div class="d-flex justify-content-between align-items-center gap-2 py-2 border-bottom">
+      <div><span class="me-2">${t.done ? "✅" : "⬜"}</span>${esc(title)} <span class="small text-secondary">· ${esc(T("minutes", {n: t.minutes}))}</span></div>
+      ${t.done && t.kind !== "skill" ? "" : `<button class="btn btn-sm ${t.done ? "btn-outline-secondary" : "btn-primary"}" onclick="${action}">${esc(T("go"))}</button>`}</div>`;
+  }).join("");
+  box.innerHTML = `<div class="card-soft"><div class="d-flex justify-content-between align-items-center">
+      <h5 class="mb-1">📅 ${esc(T("today"))}</h5><span class="small text-secondary">${esc(T("today_done", {d: todayData.done, t: todayData.total}))}</span></div>
+    ${rows || `<div class="text-secondary">${esc(T("today_empty"))}</div>`}</div>`;
+}
+
+function openReview(tab) { reviewTab = tab; openPage("review"); }
+
+async function loadReview() {
+  const root = document.getElementById("reviewRoot");
+  root.innerHTML = `<div class="loader">…</div>`;
+  try {
+    const [w, m] = await Promise.all([api("/api/review/words"), api("/api/mistakes")]);
+    reviewWords = w.words || []; reviewIndex = 0; reviewDone = 0; reviewFlipped = false;
+    mistakesData = m; mistakesPractice = null; mistakesResult = null;
+    renderReview();
+  } catch (e) { root.innerHTML = `<div class="alert alert-warning">${esc(e.message)}</div>`; }
+}
+
+function renderReview() {
+  applyUiLang();
+  const tabs = `<ul class="nav nav-tabs mb-3">
+      ${["words", "mistakes"].map(t => `<li class="nav-item"><button class="nav-link ${reviewTab === t ? "active" : ""}" onclick="reviewTab='${t}';renderReview()">${esc(T("tab_" + t))}${t === "words" && reviewWords ? ` <span class="badge text-bg-light">${reviewWords.length - reviewIndex}</span>` : t === "mistakes" && mistakesData ? ` <span class="badge text-bg-light">${mistakesData.due_count}</span>` : ""}</button></li>`).join("")}</ul>`;
+  document.getElementById("reviewRoot").innerHTML = `<h2>${esc(T("menu_review").replace(/^\S+\s/, ""))}</h2>${tabs}<div id="reviewBody"></div>`;
+  reviewTab === "words" ? renderWordCard() : renderMistakes();
+}
+
+function renderWordCard() {
+  const body = document.getElementById("reviewBody");
+  if (!reviewWords?.length) { body.innerHTML = `<div class="card-soft text-secondary">${esc(T("words_none"))}</div>`; return; }
+  if (reviewIndex >= reviewWords.length) {
+    body.innerHTML = `<div class="card-soft">✅ ${esc(T("words_finished", {n: reviewDone}))}</div>`;
+    loadToday();
+    return;
+  }
+  const w = reviewWords[reviewIndex];
+  body.innerHTML = `<p class="small text-secondary">${esc(T("words_hint"))}</p>
+    <div class="card-soft text-center rm-flashcard">
+      <div class="small text-secondary">${esc(T("word_n", {n: reviewIndex + 1, t: reviewWords.length}))}${w.topic ? ` · ${esc(w.topic)}` : ""}</div>
+      <div class="display-6 fw-bold my-2">${esc(w.word)} <button class="btn btn-sm btn-outline-secondary" onclick="speakText(${esc(JSON.stringify(w.word))}, this)">🔊</button></div>
+      <div class="text-secondary">${esc(w.part_of_speech || "")}</div>
+      ${reviewFlipped ? `<hr><div class="fs-5">${esc(w.definition || "")}</div>
+        ${w.translation ? `<div class="text-secondary">${esc(w.translation)}</div>` : ""}
+        ${w.example_sentence ? `<div class="mt-2"><em>${esc(w.example_sentence)}</em></div>` : ""}
+        ${w.collocation ? `<div class="small mt-1">${esc(w.collocation)}</div>` : ""}
+        <div class="d-flex justify-content-center gap-2 flex-wrap mt-3">
+          ${[[1, "q_forgot", "btn-outline-danger"], [3, "q_hard", "btn-outline-warning"], [4, "q_good", "btn-outline-primary"], [5, "q_easy", "btn-outline-success"]]
+            .map(([q, k, cls]) => `<button class="btn ${cls}" onclick="rateWord(${q})">${esc(T(k))}</button>`).join("")}</div>`
+      : `<button class="btn btn-primary mt-3" onclick="reviewFlipped=true;renderWordCard()">${esc(T("show_answer"))}</button>`}
+    </div>`;
+}
+
+async function rateWord(quality) {
+  const w = reviewWords[reviewIndex];
+  try { await api(`/api/review/words/${w.id}`, {method: "POST", body: JSON.stringify({quality})}); reviewDone++; }
+  catch (e) { rmToast(e.message); }
+  if (quality < 3) reviewWords.push(w);   // a forgotten word comes back once more in this session
+  reviewIndex++; reviewFlipped = false;
+  renderReview();
+}
+
+function renderMistakes() {
+  const body = document.getElementById("reviewBody");
+  const m = mistakesData || {open: [], open_count: 0, due_count: 0, resolved_count: 0};
+  let practice = "";
+  if (mistakesPractice) {
+    practice = `<div class="card-soft mb-3">${mistakesPractice.items.map(it => {
+      const r = mistakesResult?.details?.find(d => d.n === it.n);
+      return `<div class="mb-3"><div class="small text-secondary">${esc(it.rule || "")}</div>
+        <div class="fw-semibold mb-1">${it.n}. ${esc(it.sentence)}</div>
+        <input class="form-control" id="mist${it.n}" placeholder="${esc(T("fill_gap"))}" ${mistakesResult ? "disabled" : ""} value="${esc(r?.answer || "")}">
+        ${r ? `<div class="small mt-1 ${r.correct ? "text-success" : "text-danger"}">${r.correct ? "✓" : `✗ ${esc(T("correct_answer"))}: <strong>${esc(r.expected)}</strong>`} ${esc(r.explanation || "")}</div>` : ""}</div>`;
+    }).join("")}
+    ${mistakesResult ? `<div class="alert alert-primary">${esc(T("mistakes_result", {c: mistakesResult.correct, t: mistakesResult.total}))}</div>`
+      : `<button class="btn btn-primary" onclick="submitMistakes()">${esc(T("check"))}</button>`}</div>`;
+  }
+  body.innerHTML = `<p class="small text-secondary">${esc(T("mistakes_intro"))}</p>
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+      <span>${esc(T("mistakes_stats", {o: m.open_count, d: m.due_count, r: m.resolved_count}))}</span>
+      <button id="mistBtn" class="btn btn-primary" ${m.due_count ? "" : "disabled"} onclick="startMistakesPractice()">${esc(T("practise_mistakes"))}</button></div>
+    ${practice}
+    ${m.open.length ? `<details class="card-soft" ${mistakesPractice ? "" : "open"}><summary class="fw-semibold">${esc(T("all_mistakes"))}</summary>
+      ${m.open.map(x => `<div class="py-1 border-bottom"><code>${esc(x.original_fragment)}</code> → <strong>${esc(x.corrected_fragment)}</strong>
+        <div class="small text-secondary">${esc(x.rule_name || "")}${x.explanation ? " — " + esc(x.explanation) : ""}</div></div>`).join("")}</details>`
+      : `<div class="card-soft text-secondary">${esc(T(m.resolved_count ? "mistakes_all_fixed" : "mistakes_none"))}</div>`}`;
+}
+
+async function startMistakesPractice() {
+  const btn = document.getElementById("mistBtn");
+  btn.disabled = true;
+  btn.textContent = "…";
+  try { mistakesPractice = await api("/api/mistakes/practice", {method: "POST", body: "{}"}); mistakesResult = null; renderMistakes(); }
+  catch (e) { rmToast(e.message); btn.disabled = false; btn.textContent = T("practise_mistakes"); }
+}
+
+async function submitMistakes() {
+  const answers = {};
+  mistakesPractice.items.forEach(it => { answers[String(it.n)] = document.getElementById(`mist${it.n}`).value; });
+  try {
+    mistakesResult = await api("/api/mistakes/submit", {method: "POST", body: JSON.stringify({test_id: mistakesPractice.test_id, answers})});
+    mistakesData = await api("/api/mistakes");
+    renderReview();
+    loadToday();
   } catch (e) { rmToast(e.message); }
 }

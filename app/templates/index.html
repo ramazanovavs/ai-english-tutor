@@ -54,6 +54,7 @@
         <div class="menu-card">
           <button class="menu-btn active" data-page="dashboard">🏠 Dashboard</button>
           <button class="menu-btn" data-page="roadmap" id="menuRoadmap">🧭 Мой путь</button>
+          <button class="menu-btn" data-page="review" id="menuReview">🔁 Повторение</button>
           <button class="menu-btn" data-page="tutor">💬 AI Tutor</button>
           <button class="menu-btn" data-page="grammar">🧠 Grammar Coach</button>
           <button class="menu-btn" data-page="vocabulary">🔤 Vocabulary</button>
@@ -83,11 +84,16 @@
             <button class="btn btn-light" onclick="openPage('tutor')">Start practice</button>
           </div>
           <div id="roadmapDashCard" class="mb-3"></div>
+          <div id="todayCard" class="mb-3"></div>
           <div class="row g-3" id="skillCards"></div>
           <div class="card-soft mt-4">
             <h5>AI recommendation</h5>
             <p id="recommendation" class="mb-0">Loading your learning profile…</p>
           </div>
+        </div>
+
+        <div id="page-review" class="page d-none">
+          <div id="reviewRoot"><div class="loader">Loading…</div></div>
         </div>
 
         <div id="page-roadmap" class="page d-none">
