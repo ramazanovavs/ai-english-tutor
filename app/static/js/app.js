@@ -802,7 +802,7 @@ async function loadIELTSDashboard() {
     document.getElementById("ieltsExamDate").value = p.planned_exam_date || "";
     document.getElementById("ieltsBandCards").innerHTML = [
       bandCard("Overall", p.current_overall_band), bandCard("Listening", p.listening_band),
-      bandCard("Reading", p.reading_band), bandCard("Writing", p.writing_band), bandCard("Speaking*", p.speaking_band)
+      bandCard("Reading", p.reading_band), bandCard("Writing", p.writing_band), bandCard("Speaking", p.speaking_band)
     ].join("");
     document.getElementById("ieltsRecommendation").textContent = d.recommendation || "Complete a practice activity to get a recommendation.";
     const recent = [
@@ -880,6 +880,15 @@ async function assessIELTSWriting() {
 
 let ieltsSpeakingSession = null;
 
+function pronunciationFeedbackHTML(p) {
+  if (!p) return "";
+  return `<div class="card-soft my-3"><h6>Pronunciation · band ${esc(p.pronunciation)}</h6>
+    <p class="small mb-2">${esc(p.summary || "")}</p>
+    ${(p.strengths || []).length ? `<div class="small mb-1"><strong>Strengths:</strong> ${p.strengths.map(esc).join("; ")}</div>` : ""}
+    ${(p.issues || []).map(x => `<div class="small mb-1"><strong>${esc(x.feature)}:</strong> “${esc(x.example)}” — <span class="text-secondary">${esc(x.tip)}</span></div>`).join("")}
+    <div class="small text-secondary mt-1">Based on ${esc(p.sample_seconds)} seconds of your recorded answers.</div></div>`;
+}
+
 async function startIELTSSpeaking() {
   const part = Number(document.getElementById("ieltsSpeakingPart").value);
   const btn = document.getElementById("ieltsSpeakStartBtn");
@@ -898,11 +907,15 @@ async function startIELTSSpeaking() {
     result.innerHTML = `<div class="loader">Assessing your answers…</div>`;
     const d = await api(`/api/ielts/speaking/session/${first.session_id}/assess`, {method: "POST", body: "{}"});
     result.innerHTML = `
-      <div class="d-flex justify-content-between"><h4>Provisional language band ${esc(Number(d.provisional_language_band).toFixed(1))}</h4><span class="badge text-bg-warning">Pronunciation not scored</span></div>
+      <div class="d-flex justify-content-between"><h4>${d.speaking_band != null
+          ? `Speaking band ${esc(Number(d.speaking_band).toFixed(1))}`
+          : `Language band ${esc(Number(d.provisional_language_band).toFixed(1))}`}</h4>
+        <span class="badge ${d.pronunciation != null ? "text-bg-success" : "text-bg-warning"}">${d.pronunciation != null ? "All 4 criteria · AI estimate" : "Pronunciation could not be assessed"}</span></div>
       <div class="row g-2 my-2">${bandCard("Fluency & Coherence", d.fluency_coherence)}${bandCard("Lexical Resource", d.lexical_resource)}${bandCard("Grammar", d.grammatical_range_accuracy)}${bandCard("Pronunciation", d.pronunciation)}</div>
       <p class="small text-secondary">${esc(d.disclaimer || "")}</p>
       <h6>Strengths</h6><ul>${(d.strengths || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul>
       <h6>Improve</h6>${(d.improvements || []).map(x => `<div class="mb-2"><strong>${esc(x.criterion)}:</strong> ${esc(x.issue)}<br><span class="text-secondary">${esc(x.action)}</span></div>`).join("")}
+      ${pronunciationFeedbackHTML(d.pronunciation_feedback)}
       ${(d.better_phrasing || []).length ? `<h6 class="mt-3">Better phrasing</h6>${d.better_phrasing.map(x => `<div class="mb-1"><code>${esc(x.original)}</code> → <strong>${esc(x.improved)}</strong></div>`).join("")}` : ""}
       <details class="mt-3"><summary>Transcript of the conversation</summary><div class="small mt-2" style="white-space:pre-line">${esc(d.transcript || "")}</div></details>`;
     await loadIELTSDashboard();
@@ -1172,6 +1185,7 @@ const MOCK_RULES = {
     "The examiner asks the questions aloud — they are not shown on screen. Answer by voice; the microphone opens automatically.",
     "Part 2: you get a topic card and 1 minute to prepare (you can make notes), then speak for up to 2 minutes.",
     "Part 3: the examiner's questions follow what you say. Use headphones and a quiet room.",
+    "All four criteria are assessed, including Pronunciation from your recorded voice.",
   ],
 };
 
@@ -1602,7 +1616,7 @@ async function finishFullIELTSMock() {
       </div>
       <div class="row g-3 mb-4">
         ${bandCard("Listening", b.listening)}${bandCard("Reading", b.reading)}
-        ${bandCard("Writing", b.writing)}${bandCard("Speaking*", b.speaking)}
+        ${bandCard("Writing", b.writing)}${bandCard(sp.pronunciation != null ? "Speaking" : "Speaking*", b.speaking)}
       </div>
       <div class="alert alert-warning small">${esc(d.disclaimer)}</div>
       <div class="card-soft mb-3"><h5>Listening review</h5>${mockObjectiveReview("listening", d.review?.listening)}</div>
@@ -1617,6 +1631,7 @@ async function finishFullIELTSMock() {
       </div>
       <div class="card-soft mb-3"><h5>Speaking</h5>
         ${(sp.improvements || []).map(x => `<div class="small mb-1"><strong>${esc(x.criterion)}:</strong> ${esc(x.issue)} — <span class="text-secondary">${esc(x.action)}</span></div>`).join("") || '<div class="small text-secondary">No feedback.</div>'}
+        ${pronunciationFeedbackHTML(sp.pronunciation_feedback)}
         ${spText ? `<details class="mt-2"><summary>Transcript of the interview</summary><div class="small mt-2" style="white-space:pre-line">${esc(spText)}</div></details>` : ""}
       </div>
       <button class="btn btn-primary" onclick="resetFullIELTSMock()">Start another full mock</button>

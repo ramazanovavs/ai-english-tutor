@@ -25,7 +25,8 @@ from app.config import get_settings
 from app.agents.assessment_agent import generate as generate_test
 from app.services.openai_service import ask_text, ask_json, transcribe_audio, synthesize_speech
 from app.services.ielts_scoring import overall_band as ielts_overall_band, writing_band as ielts_writing_band
-from app.services import ielts_exam, ielts_speaking
+from app.services import ielts_exam, ielts_speaking, ielts_pronunciation
+from app.services.ielts_scoring import criteria_band as ielts_criteria_band
 import threading
 from app.agents.ielts_agent import (
     generate_writing_prompt as ielts_generate_writing_prompt,
@@ -1142,6 +1143,29 @@ def _speaking_take_answer(session: dict, prefix: str, turn_id: str, audio: Uploa
     ielts_speaking.record_answer(session, turn_id, transcript, path, seconds)
 
 
+def _speaking_add_pronunciation(session: dict, result: dict, parts: list[int]) -> float:
+    """Listen to the recorded answers and add Pronunciation; returns the Speaking band."""
+    language = [result.get("fluency_coherence"), result.get("lexical_resource"), result.get("grammatical_range_accuracy")]
+    turns = ielts_pronunciation.pick_turns([t for t in session["turns"] if t["part"] in parts])
+    recordings = []
+    for t in turns:
+        try:
+            recordings.append(admin_db().storage.from_(ielts_exam.BUCKET).download(t["audio_path"]))
+        except Exception:
+            logger.exception("Could not load a speaking recording")
+    transcript = "\n\n".join(v for k, v in ielts_speaking.transcripts_by_part(session).items() if int(k) in parts)
+    pron = ielts_pronunciation.assess(recordings, transcript) if recordings else None
+    if not pron:
+        result["pronunciation"] = None
+        return float(result.get("provisional_language_band") or 0)
+    result["pronunciation"] = pron["pronunciation"]
+    result["pronunciation_feedback"] = pron
+    result["speaking_band"] = ielts_criteria_band(language + [pron["pronunciation"]])
+    result["disclaimer"] = ("AI practice estimate from your recorded answers (all four criteria, including "
+                            "Pronunciation). Only an official test can award an IELTS band.")
+    return float(result["speaking_band"])
+
+
 def _speaking_reply(session: dict) -> dict:
     turn = ielts_speaking.pending_turn(session) or session["turns"][-1]
     return {"turn": ielts_speaking.public_turn(turn), "done": session["done"]}
@@ -1206,6 +1230,7 @@ def ielts_speaking_session_assess(session_id: str, user=Depends(require_user)):
     prompt = material.get("cue_card") or "\n".join(material.get("questions") or [])
     result = ielts_assess_speaking(part, prompt, transcript)
     result["transcript"] = transcript
+    _speaking_add_pronunciation(session, result, [part])
     save_ielts_speaking(user["id"], part, prompt, transcript, result)
     content["result"] = result
     _practice_session_save(session_id, content)
@@ -1662,7 +1687,7 @@ def ielts_mock_speaking_submit(mock_id: str, user=Depends(require_user)):
         parts[f"part{p}"] = {"prompt": (row or {}).get("content"), "transcript": transcripts.get(str(p), "(no answer)")}
 
     result = mock_assess_full_speaking(parts)
-    band = float(result.get("provisional_language_band") or 0)
+    band = _speaking_add_pronunciation(session, result, [1, 2, 3])
     for p in (1, 2, 3):
         row = mock_get_section(user["id"], mock_id, "speaking", p)
         audio_paths = [t["audio_path"] for t in session["turns"] if t["part"] == p and t.get("audio_path")]
@@ -1700,7 +1725,7 @@ def ielts_mock_finish(mock_id: str, user=Depends(require_user)):
         db.table("ielts_band_history").insert({
             "user_id": user["id"], "section": "overall", "band": overall,
             "source": "full_mock_ai_practice",
-            "note": "Practice overall uses transcript-only provisional Speaking; pronunciation was not assessed.",
+            "note": "Practice overall from the full mock (AI estimates).",
         }).execute()
 
     full = mock_get(user["id"], mock_id)
@@ -1723,5 +1748,7 @@ def ielts_mock_finish(mock_id: str, user=Depends(require_user)):
         "bands": {"listening": float(bands[0]), "reading": float(bands[1]),
                   "writing": float(bands[2]), "speaking": float(bands[3])},
         "review": review,
-        "disclaimer": "Practice estimate only. This is not an official IELTS result; Speaking pronunciation is not assessed in transcript-only mode.",
+        "disclaimer": ("Practice estimate only. This is not an official IELTS result."
+                       + ("" if (review.get("speaking", {}).get("1", {}).get("result") or {}).get("pronunciation") is not None
+                          else " Speaking pronunciation could not be assessed this time, so Speaking uses three criteria.")),
     }

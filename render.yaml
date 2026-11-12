@@ -21,6 +21,8 @@ services:
         value: gpt-4o-mini-tts
       - key: OPENAI_TTS_VOICE
         value: marin
+      - key: OPENAI_AUDIO_MODEL
+        value: gpt-audio-1.5
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_ANON_KEY

@@ -53,8 +53,9 @@ def save_speaking_attempt(user_id: str, part: int, prompt: str, transcript: str,
         "fluency_coherence": result.get("fluency_coherence"),
         "lexical_resource": result.get("lexical_resource"),
         "grammatical_range_accuracy": result.get("grammatical_range_accuracy"),
-        "pronunciation": None,
-        "provisional_language_band": result.get("provisional_language_band"),
+        "pronunciation": result.get("pronunciation"),
+        # With Pronunciation assessed from audio this is the full 4-criteria Speaking band.
+        "provisional_language_band": result.get("speaking_band", result.get("provisional_language_band")),
         "feedback": result,
     }).execute()
     _refresh_section_band(user_id, "speaking")

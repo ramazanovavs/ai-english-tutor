@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     openai_transcribe_model: str = "gpt-4o-mini-transcribe"
     openai_tts_model: str = "gpt-4o-mini-tts"
     openai_tts_voice: str = "marin"
+    openai_audio_model: str = "gpt-audio-1.5"  # listens to Speaking answers for Pronunciation
 
     supabase_url: str
     supabase_anon_key: str
