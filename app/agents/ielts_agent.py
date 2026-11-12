@@ -5,6 +5,7 @@ from typing import Any
 from app.services.openai_service import ask_json
 from app.services.ielts_scoring import criterion, criteria_band
 from app.agents.ielts_visuals import CHART_SPEC, pick_type, clean_chart, chart_as_text
+from app.agents.ielts_verify import verify as verify_key
 from app.agents.ielts_rubrics import (DATA_GUARD, WRITING_DESCRIPTORS, SPEAKING_DESCRIPTORS,
                                       learner_block, language_rule)
 
@@ -139,7 +140,7 @@ Use a varied mix of multiple choice, true/false/not given, matching-style, and s
 answer_key: object mapping string question ids to exact answers. explanations: object mapping ids to concise explanations.
 """
     kind = "General Training" if test_type.lower().startswith("general") else "Academic"
-    return ask_json(instructions, f"IELTS {kind}. {EXAM_LEVEL}")
+    return verify_key(ask_json(instructions, f"IELTS {kind}. {EXAM_LEVEL}"), "passage", "passage")
 
 
 def generate_listening_practice() -> dict:
@@ -151,4 +152,4 @@ questions: exactly 10 objects with id (1-10), type, question, options (array; us
 answer_key: object mapping string ids to exact answers. explanations: object mapping ids to concise explanations.
 Do not copy published IELTS material.
 """
-    return ask_json(instructions, EXAM_LEVEL)
+    return verify_key(ask_json(instructions, EXAM_LEVEL), "audio_script", "transcript")

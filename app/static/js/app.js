@@ -2450,10 +2450,13 @@ async function loadBankAudio(id, name, elId) {
 
 function bankQuestionsHTML(c, suspiciousPrefix, suspicious) {
   const key = c.answer_key || {};
-  return `<table class="table table-sm small"><thead><tr><th>#</th><th>Question</th><th>Answer key</th><th>Explanation</th></tr></thead><tbody>
+  const v = c.verification;
+  const note = v ? `<div class="small text-secondary">Key check: ${v.status === "ok" ? `${esc(v.checked)} questions checked by a second model` : esc(v.status)}${(v.fixed || []).length ? ` · fixed: ${v.fixed.map(esc).join(", ")}` : ""}${(v.unverified || []).length ? ` · <span class="text-danger">still disputed: ${v.unverified.map(esc).join(", ")}</span>` : ""}</div>` : "";
+  return note + `<table class="table table-sm small"><thead><tr><th>#</th><th>Question</th><th>Answer key</th><th>Explanation</th></tr></thead><tbody>
     ${(c.questions || []).map(q => {
       const ans = key[String(q.id)];
-      const bad = suspicious.includes(`${suspiciousPrefix}:${q.id}`);
+      const bad = suspicious.includes(`${suspiciousPrefix}:${q.id}`)
+        || (c.verification?.unverified || []).includes(String(q.id));
       return `<tr class="${bad ? "table-danger" : ""}"><td>${esc(q.id)}${bad ? " ⚠" : ""}</td>
         <td>${esc(q.question)}${(q.options || []).length ? `<div class="text-secondary">${q.options.map(esc).join(" · ")}</div>` : ""}${q.instruction ? `<div class="text-secondary fst-italic">${esc(q.instruction)}</div>` : ""}</td>
         <td><strong>${esc(Array.isArray(ans) ? ans.join(" / ") : (ans ?? ""))}</strong></td>

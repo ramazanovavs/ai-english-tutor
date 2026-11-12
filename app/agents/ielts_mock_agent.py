@@ -4,6 +4,7 @@ from app.services.openai_service import ask_json
 from app.agents.ielts_agent import EXAM_LEVEL
 from app.services.ielts_scoring import criterion, criteria_band
 from app.agents.ielts_visuals import CHART_SPEC, pick_type, clean_chart
+from app.agents.ielts_verify import verify as verify_key
 from app.agents.ielts_rubrics import SPEAKING_DESCRIPTORS, DATA_GUARD, learner_block, language_rule
 
 
@@ -87,8 +88,9 @@ Do not reveal answers in question wording.
     last_error = None
     for _ in range(2):
         try:
-            return _clean_listening_part(
+            part_content = _clean_listening_part(
                 ask_json(instructions, f"Part: {part}\nSituation: {situation}\n{EXAM_LEVEL}"), part)
+            return verify_key(part_content, "audio_script", "transcript")
         except ValueError as exc:
             last_error = exc
     raise last_error
@@ -141,10 +143,10 @@ Use a realistic mix of IELTS-style question types that work in plain text.
 For text-entry questions, state a strict word limit in instruction.
 Questions and keys must be unambiguous from the passage.
 """
-    return ask_json(
+    return verify_key(ask_json(
         instructions,
         f"Test type: {kind}\nReading section: {section}\n{EXAM_LEVEL}",
-    )
+    ), "passage", "passage")
 
 
 def generate_full_writing(test_type: str) -> dict:
