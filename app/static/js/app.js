@@ -2381,7 +2381,8 @@ async function loadIELTSBankAdmin() {
   const groups = {};
   (d.items || []).forEach(it => (groups[it.bank_key] = groups[it.bank_key] || []).push(it));
   const keys = Object.keys(BANK_LABELS);
-  box.innerHTML = `<div class="card-soft">
+  box.innerHTML = `<div class="card-soft mb-3"><h5>Storage <span class="badge text-bg-secondary">admin</span></h5><div id="storageCleanupBox"></div></div>
+  <div class="card-soft">
     <h5>IELTS bank <span class="badge text-bg-secondary">admin</span></h5>
     <p class="small text-secondary">Filled automatically from successful generations (up to ${d.mock_limit} full mocks per test type and ${d.practice_limit} practice sets per section).
       Used when OpenAI is unavailable; <strong>verified</strong> full mocks can also be chosen by learners. ⚠ marks questions that almost nobody answers “correctly” — check the key.</p>
@@ -2404,6 +2405,26 @@ async function loadIELTSBankAdmin() {
       </details>`;
     }).join("")}
   </div>`;
+  loadStorageCleanup();
+}
+
+async function loadStorageCleanup() {
+  const el = document.getElementById("storageCleanupBox");
+  if (!el) return;
+  try {
+    const s = await api("/api/admin/storage-cleanup");
+    const r = s.last_result;
+    el.innerHTML = `<div class="small">Audio of exams and Speaking practice older than ${esc(s.retention_days)} days is deleted automatically
+      (checked every ${esc(s.check_hours)} h; bank items and recordings still waiting for assessment are kept; texts and scores stay).
+      ${r ? `Last run ${esc(String(r.ran_at).slice(0, 16).replace("T", " "))}: ${esc(r.files)} files from ${esc(r.mocks)} mocks and ${esc(r.practice_sessions)} practice sessions${r.skipped_pending ? `, ${esc(r.skipped_pending)} waiting for assessment kept` : ""}.` : "No run since the server started."}
+      <button class="btn btn-sm btn-outline-secondary ms-2" onclick="runStorageCleanup(this)">Run now</button></div>`;
+  } catch (e) { el.textContent = e.message; }
+}
+
+async function runStorageCleanup(btn) {
+  btn.disabled = true; btn.textContent = "Cleaning…";
+  try { await api("/api/admin/storage-cleanup", {method: "POST", body: "{}"}); } catch (e) { alert(e.message); }
+  loadStorageCleanup();
 }
 
 async function verifyBankItem(id, verified) {

@@ -25,7 +25,7 @@ from app.config import get_settings
 from app.agents.assessment_agent import generate as generate_test
 from app.services.openai_service import ask_text, ask_json, transcribe_audio, synthesize_speech
 from app.services.ielts_scoring import overall_band as ielts_overall_band, writing_band as ielts_writing_band
-from app.services import ielts_exam, ielts_speaking, ielts_pronunciation, ielts_bank
+from app.services import ielts_exam, ielts_speaking, ielts_pronunciation, ielts_bank, storage_cleanup
 from app.services.ielts_scoring import criteria_band as ielts_criteria_band
 import threading
 from app.agents.ielts_agent import (
@@ -119,6 +119,7 @@ class TTSPayload(BaseModel):
 @router.get("/me")
 def me(user=Depends(require_user)):
     ensure_profile(user["id"], user.get("email"))
+    storage_cleanup.maybe_run_in_background()  # deletes audio older than 30 days, at most every 12 hours
     context = get_student_context(user["id"])
     context["email"] = user.get("email")
     context["is_admin"] = _is_admin(user)
@@ -2097,3 +2098,21 @@ def admin_ielts_bank_delete(item_id: str, user=Depends(require_user)):
     _require_admin(user)
     ielts_bank.delete(item_id)
     return {"ok": True}
+
+
+# ========================= ADMIN: storage cleanup =========================
+
+@router.get("/admin/storage-cleanup")
+def admin_storage_cleanup_status(user=Depends(require_user)):
+    _require_admin(user)
+    return storage_cleanup.status()
+
+
+@router.post("/admin/storage-cleanup")
+def admin_storage_cleanup_run(user=Depends(require_user)):
+    _require_admin(user)
+    try:
+        return storage_cleanup.run()
+    except Exception as exc:
+        logger.exception("Storage cleanup failed")
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {exc}")
