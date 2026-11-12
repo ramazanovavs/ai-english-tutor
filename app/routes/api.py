@@ -25,7 +25,7 @@ from app.config import get_settings
 from app.agents.assessment_agent import generate as generate_test
 from app.services.openai_service import ask_text, ask_json, transcribe_audio, synthesize_speech
 from app.services.ielts_scoring import overall_band as ielts_overall_band, writing_band as ielts_writing_band
-from app.services import ielts_exam
+from app.services import ielts_exam, ielts_speaking
 import threading
 from app.agents.ielts_agent import (
     generate_writing_prompt as ielts_generate_writing_prompt,
@@ -1109,6 +1109,109 @@ def _ielts_public_questions(content: dict) -> list[dict]:
     ]
 
 
+# ---------- Speaking with an examiner (practice: one part) ----------
+
+class IELTSSpeakingSessionPayload(BaseModel):
+    part: int = Field(default=1, ge=1, le=3)
+
+
+def _speaking_store_audio(prefix: str, turn_id: str, data: bytes, content_type: str | None) -> str | None:
+    path = f"speaking/{prefix}/{turn_id}.webm"
+    try:
+        admin_db().storage.from_(ielts_exam.BUCKET).upload(
+            path, data, {"content-type": content_type or "audio/webm", "upsert": "true"})
+        return path
+    except Exception:
+        logger.exception("Could not store speaking audio")
+        return None
+
+
+def _speaking_take_answer(session: dict, prefix: str, turn_id: str, audio: UploadFile, seconds: float | None) -> None:
+    pending = ielts_speaking.pending_turn(session)
+    if not pending or pending["id"] != turn_id:
+        raise HTTPException(status_code=409, detail="This question has already been answered.")
+    data = audio.file.read()
+    transcript = ""
+    if data and len(data) > 1000:
+        try:
+            transcript = transcribe_audio(audio.filename or "answer.webm", data, audio.content_type)
+        except Exception as exc:
+            logger.exception("Transcription failed")
+            raise HTTPException(status_code=502, detail=f"Could not transcribe your answer: {exc}")
+    path = _speaking_store_audio(prefix, turn_id, data, audio.content_type) if data else None
+    ielts_speaking.record_answer(session, turn_id, transcript, path, seconds)
+
+
+def _speaking_reply(session: dict) -> dict:
+    turn = ielts_speaking.pending_turn(session) or session["turns"][-1]
+    return {"turn": ielts_speaking.public_turn(turn), "done": session["done"]}
+
+
+def _practice_session_load(session_id: str, user_id: str) -> dict:
+    rows = (admin_db().table("tests").select("*").eq("id", session_id).eq("user_id", user_id)
+            .eq("test_type", "ielts_speaking_session").limit(1).execute()).data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Speaking session not found.")
+    return rows[0]["questions"]
+
+
+def _practice_session_save(session_id: str, content: dict) -> None:
+    admin_db().table("tests").update({"questions": content}).eq("id", session_id).execute()
+
+
+@router.post("/ielts/speaking/session")
+def ielts_speaking_session_start(payload: IELTSSpeakingSessionPayload, user=Depends(require_user)):
+    ensure_ielts_profile(user["id"])
+    material = ielts_generate_speaking_set(payload.part)
+    content = {str(payload.part): {
+        "questions": material.get("questions") or [],
+        "cue_card": material.get("cue_card") or "",
+        "bullet_points": material.get("bullet_points") or [],
+    }}
+    session = ielts_speaking.new_session(content, [payload.part])
+    ielts_speaking.next_turn(session)
+    row = admin_db().table("tests").insert({
+        "user_id": user["id"], "title": material.get("title") or f"IELTS Speaking Part {payload.part}",
+        "test_type": "ielts_speaking_session", "focus": "ielts_speaking",
+        "questions": {"session": session, "material": material},
+    }).execute()
+    reply = _speaking_reply(session)
+    reply.update(session_id=row.data[0]["id"], part=payload.part)
+    return reply
+
+
+@router.post("/ielts/speaking/session/{session_id}/answer")
+def ielts_speaking_session_answer(session_id: str, turn_id: str = Form(...), seconds: float | None = Form(None),
+                                  audio: UploadFile = File(...), user=Depends(require_user)):
+    content = _practice_session_load(session_id, user["id"])
+    session = content["session"]
+    _speaking_take_answer(session, f"practice/{session_id}", turn_id, audio, seconds)
+    if not session["done"]:
+        ielts_speaking.next_turn(session)
+    _practice_session_save(session_id, content)
+    return _speaking_reply(session)
+
+
+@router.post("/ielts/speaking/session/{session_id}/assess")
+def ielts_speaking_session_assess(session_id: str, user=Depends(require_user)):
+    content = _practice_session_load(session_id, user["id"])
+    session = content["session"]
+    if not session["done"]:
+        raise HTTPException(status_code=400, detail="Finish the speaking part first.")
+    if content.get("result"):
+        return content["result"]
+    part = session["parts"][0]
+    transcript = ielts_speaking.transcripts_by_part(session).get(str(part), "")
+    material = content.get("material") or {}
+    prompt = material.get("cue_card") or "\n".join(material.get("questions") or [])
+    result = ielts_assess_speaking(part, prompt, transcript)
+    result["transcript"] = transcript
+    save_ielts_speaking(user["id"], part, prompt, transcript, result)
+    content["result"] = result
+    _practice_session_save(session_id, content)
+    return result
+
+
 @router.post("/ielts/reading/generate")
 def ielts_reading_generate(payload: IELTSPracticeGeneratePayload, user=Depends(require_user)):
     ensure_ielts_profile(user["id"])
@@ -1503,24 +1606,70 @@ def ielts_mock_section_submit(mock_id: str, payload: IELTSMockAnswersPayload, us
     return _mock_status_payload(mock_get(user["id"], mock_id))
 
 
-@router.post("/ielts/mock/{mock_id}/speaking/submit")
-def ielts_mock_speaking_submit(mock_id: str, payload: IELTSMockSpeakingSubmitPayload, user=Depends(require_user)):
+def _mock_speaking_session(user: dict, mock: dict) -> dict:
+    meta = mock.get("metadata") or {}
+    if meta.get("speaking_session"):
+        return meta["speaking_session"]
+    content = {}
+    for p in (1, 2, 3):
+        row = mock_get_section(user["id"], mock["id"], "speaking", p) or {}
+        content[str(p)] = row.get("content") or {}
+    session = ielts_speaking.new_session(content, [1, 2, 3])
+    ielts_speaking.next_turn(session)
+    return session
+
+
+def _mock_speaking_ready(user: dict, mock_id: str) -> dict:
     mock = _mock_or_404(user, mock_id)
+    meta = mock.get("metadata") or {}
+    if "speaking" not in (meta.get("timing") or {}) or _mock_section_done(mock, "speaking"):
+        raise HTTPException(status_code=403, detail="The Speaking test is not in progress.")
+    return mock
+
+
+@router.post("/ielts/mock/{mock_id}/speaking/turn")
+def ielts_mock_speaking_turn(mock_id: str, user=Depends(require_user)):
+    mock = _mock_speaking_ready(user, mock_id)
+    session = _mock_speaking_session(user, mock)
+    ielts_exam.update_meta(mock_id, lambda m: m.update(speaking_session=session))
+    return _speaking_reply(session)
+
+
+@router.post("/ielts/mock/{mock_id}/speaking/answer")
+def ielts_mock_speaking_answer(mock_id: str, turn_id: str = Form(...), seconds: float | None = Form(None),
+                               audio: UploadFile = File(...), user=Depends(require_user)):
+    mock = _mock_speaking_ready(user, mock_id)
+    session = _mock_speaking_session(user, mock)
+    _speaking_take_answer(session, f"mock/{mock_id}", turn_id, audio, seconds)
+    if not session["done"]:
+        ielts_speaking.next_turn(session)
+    ielts_exam.update_meta(mock_id, lambda m: m.update(speaking_session=session))
+    return _speaking_reply(session)
+
+
+@router.post("/ielts/mock/{mock_id}/speaking/submit")
+def ielts_mock_speaking_submit(mock_id: str, user=Depends(require_user)):
+    mock = _mock_or_404(user, mock_id)
+    if _mock_section_done(mock, "speaking"):
+        return _mock_status_payload(mock)
+    session = (mock.get("metadata") or {}).get("speaking_session")
+    if not session or not session.get("done"):
+        raise HTTPException(status_code=400, detail="The Speaking test is not finished yet.")
+    transcripts = ielts_speaking.transcripts_by_part(session)
     parts = {}
     for p in (1, 2, 3):
         row = mock_get_section(user["id"], mock_id, "speaking", p)
-        transcript = (payload.transcripts.get(str(p)) or "").strip()
-        if not row or not transcript:
-            raise HTTPException(status_code=400, detail=f"Speaking Part {p} is incomplete.")
-        parts[f"part{p}"] = {"prompt": row["content"], "transcript": transcript}
+        parts[f"part{p}"] = {"prompt": (row or {}).get("content"), "transcript": transcripts.get(str(p), "(no answer)")}
 
     result = mock_assess_full_speaking(parts)
     band = float(result.get("provisional_language_band") or 0)
     for p in (1, 2, 3):
         row = mock_get_section(user["id"], mock_id, "speaking", p)
-        transcript = payload.transcripts[str(p)]
-        mock_complete_section(user["id"], mock_id, "speaking", p, answers={"transcript": transcript}, estimated_band=band, result=result)
-        save_ielts_speaking(user["id"], p, str(row["content"]), transcript, result)
+        audio_paths = [t["audio_path"] for t in session["turns"] if t["part"] == p and t.get("audio_path")]
+        mock_complete_section(user["id"], mock_id, "speaking", p,
+                              answers={"transcript": transcripts.get(str(p), ""), "audio": audio_paths},
+                              estimated_band=band, result=result)
+        save_ielts_speaking(user["id"], p, str((row or {}).get("content")), transcripts.get(str(p), ""), result)
     mock_update_band(user["id"], mock_id, "speaking", band)
     return _mock_status_payload(mock_get(user["id"], mock_id))
 
@@ -1565,7 +1714,8 @@ def ielts_mock_finish(mock_id: str, user=Depends(require_user)):
                 "total": row.get("total_questions"),
                 "band": row.get("estimated_band"),
                 "result": row.get("result") or {},
-                "transcript": (row.get("content") or {}).get("audio_script") if section == "listening" else None,
+                "transcript": (row.get("content") or {}).get("audio_script") if section == "listening"
+                              else ((row.get("answers") or {}).get("transcript") if section == "speaking" else None),
             }
     return {
         "mock": {k: full.get(k) for k in ("id", "test_type", "status", "started_at", "completed_at")},

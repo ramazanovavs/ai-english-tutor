@@ -878,67 +878,39 @@ async function assessIELTSWriting() {
   } catch(e) { document.getElementById("ieltsWritingResult").textContent = e.message; }
 }
 
-async function generateIELTSSpeaking() {
-  document.getElementById("ieltsSpeakingResult").innerHTML = "";
-  try {
-    currentIELTSSpeaking = await api("/api/ielts/speaking/generate", {method:"POST", body:JSON.stringify({
-      part: Number(document.getElementById("ieltsSpeakingPart").value)
-    })});
-    document.getElementById("ieltsSpeakingPromptBox").classList.remove("d-none");
-    document.getElementById("ieltsSpeakingTitle").textContent = currentIELTSSpeaking.title || `Speaking Part ${currentIELTSSpeaking.part}`;
-    document.getElementById("ieltsSpeakingQuestions").innerHTML = `<p>${esc(currentIELTSSpeaking.instructions||"")}</p><ol>${(currentIELTSSpeaking.questions||[]).map(q=>`<li>${esc(q)}</li>`).join("")}</ol>`;
-  } catch(e) { document.getElementById("ieltsSpeakingResult").textContent = e.message; }
-}
+let ieltsSpeakingSession = null;
 
-async function recordIELTSSpeaking() {
-  const btn = document.getElementById("ieltsMicBtn");
-  if (ieltsRecorder && ieltsRecorder.state === "recording") { ieltsRecorder.stop(); return; }
-  if (!navigator.mediaDevices || !window.MediaRecorder) return alert("Audio recording is not supported in this browser.");
+async function startIELTSSpeaking() {
+  const part = Number(document.getElementById("ieltsSpeakingPart").value);
+  const btn = document.getElementById("ieltsSpeakStartBtn");
+  const box = document.getElementById("ieltsSpeakingExaminer");
+  const result = document.getElementById("ieltsSpeakingResult");
+  result.innerHTML = "";
+  try { await examinerPrepare(); }
+  catch (e) { return alert(`Microphone access is needed. ${e.message || ""}`); }
+  btn.disabled = true;
+  box.innerHTML = `<div class="loader">The examiner is getting ready…</div>`;
   try {
-    ieltsStream = await navigator.mediaDevices.getUserMedia({audio:true});
-    const preferred = "audio/webm;codecs=opus";
-    ieltsRecorder = new MediaRecorder(ieltsStream, MediaRecorder.isTypeSupported(preferred)?{mimeType:preferred}:{});
-    ieltsChunks = [];
-    ieltsRecorder.ondataavailable = e => { if (e.data?.size) ieltsChunks.push(e.data); };
-    ieltsRecorder.onstop = async () => {
-      btn.disabled = true; btn.textContent = "Transcribing…";
-      ieltsStream?.getTracks().forEach(t=>t.stop());
-      try {
-        const mime = ieltsRecorder.mimeType || "audio/webm";
-        const blob = new Blob(ieltsChunks,{type:mime});
-        const form = new FormData();
-        form.append("audio", blob, "ielts-speaking.webm");
-        form.append("scenario", `IELTS Speaking Part ${document.getElementById("ieltsSpeakingPart").value}`);
-        const d = await apiForm("/api/audio/transcribe", form);
-        document.getElementById("ieltsSpeakingTranscript").value = d.transcript;
-      } catch(e) { alert(e.message); }
-      finally { btn.disabled=false; btn.textContent="🎙 Record answer"; ieltsRecorder=null; ieltsChunks=[]; }
-    };
-    ieltsRecorder.start(); btn.textContent="⏹ Stop recording";
-    setTimeout(()=>{ if(ieltsRecorder?.state==="recording") ieltsRecorder.stop(); }, 120000);
-  } catch(e) { alert("Microphone access failed."); }
-}
-
-async function assessIELTSSpeaking() {
-  const transcript = document.getElementById("ieltsSpeakingTranscript").value.trim();
-  if (!transcript) return alert("Record or type an answer first.");
-  if (!currentIELTSSpeaking) return alert("Generate speaking questions first.");
-  const prompt = (currentIELTSSpeaking.questions || []).join("\n");
-  loading("ieltsSpeakingResult", "Assessing speaking transcript…");
-  try {
-    const d = await api("/api/ielts/speaking/assess", {method:"POST", body:JSON.stringify({
-      part:Number(document.getElementById("ieltsSpeakingPart").value), prompt, transcript
-    })});
-    document.getElementById("ieltsSpeakingResult").innerHTML = `
+    const first = await api("/api/ielts/speaking/session", {method: "POST", body: JSON.stringify({part})});
+    ieltsSpeakingSession = first.session_id;
+    await runExaminer(box, first, `/api/ielts/speaking/session/${first.session_id}/answer`);
+    examinerRelease();
+    result.innerHTML = `<div class="loader">Assessing your answers…</div>`;
+    const d = await api(`/api/ielts/speaking/session/${first.session_id}/assess`, {method: "POST", body: "{}"});
+    result.innerHTML = `
       <div class="d-flex justify-content-between"><h4>Provisional language band ${esc(Number(d.provisional_language_band).toFixed(1))}</h4><span class="badge text-bg-warning">Pronunciation not scored</span></div>
-      <div class="row g-2 my-2">${bandCard("Fluency & Coherence",d.fluency_coherence)}${bandCard("Lexical Resource",d.lexical_resource)}${bandCard("Grammar",d.grammatical_range_accuracy)}${bandCard("Pronunciation",null)}</div>
-      <p class="small text-secondary">${esc(d.disclaimer)}</p>
-      <h6>Strengths</h6><ul>${(d.strengths||[]).map(x=>`<li>${esc(x)}</li>`).join("")}</ul>
-      <h6>Improve</h6>${(d.improvements||[]).map(x=>`<div class="mb-2"><strong>${esc(x.criterion)}:</strong> ${esc(x.issue)}<br><span class="text-secondary">${esc(x.action)}</span></div>`).join("")}
-      <div class="alert alert-light"><strong>Follow-up:</strong> ${esc(d.follow_up_question)}</div>
-      <button class="btn btn-sm btn-outline-primary" onclick="speakText(${JSON.stringify(String(d.follow_up_question || ""))}, this)">🔊 Listen to follow-up</button>`;
+      <div class="row g-2 my-2">${bandCard("Fluency & Coherence", d.fluency_coherence)}${bandCard("Lexical Resource", d.lexical_resource)}${bandCard("Grammar", d.grammatical_range_accuracy)}${bandCard("Pronunciation", d.pronunciation)}</div>
+      <p class="small text-secondary">${esc(d.disclaimer || "")}</p>
+      <h6>Strengths</h6><ul>${(d.strengths || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul>
+      <h6>Improve</h6>${(d.improvements || []).map(x => `<div class="mb-2"><strong>${esc(x.criterion)}:</strong> ${esc(x.issue)}<br><span class="text-secondary">${esc(x.action)}</span></div>`).join("")}
+      ${(d.better_phrasing || []).length ? `<h6 class="mt-3">Better phrasing</h6>${d.better_phrasing.map(x => `<div class="mb-1"><code>${esc(x.original)}</code> → <strong>${esc(x.improved)}</strong></div>`).join("")}` : ""}
+      <details class="mt-3"><summary>Transcript of the conversation</summary><div class="small mt-2" style="white-space:pre-line">${esc(d.transcript || "")}</div></details>`;
     await loadIELTSDashboard();
-  } catch(e) { document.getElementById("ieltsSpeakingResult").textContent = e.message; }
+  } catch (e) {
+    box.insertAdjacentHTML("beforeend", `<div class="alert alert-danger mt-2">${esc(e.message)}</div>`);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function renderIELTSQuestions(containerId, data, section) {
@@ -1060,9 +1032,6 @@ let mockPollTimer = null;
 let mockAudioEl = null;         // one audio element, unlocked by the learner's click
 let mockListeningRun = 0;       // invalidates old Listening runners
 let mockSubmitting = false;
-let mockSpeakingRecorder = null;
-let mockSpeakingChunks = [];
-let mockSpeakingStream = null;
 
 const MOCK_SECTION_LABEL = {listening: "Listening", reading: "Reading", writing: "Writing", speaking: "Speaking"};
 
@@ -1200,7 +1169,9 @@ const MOCK_RULES = {
   ],
   speaking: [
     "The Speaking test has 3 parts and takes 11–14 minutes.",
-    "Record your answers aloud. They are transcribed and assessed together at the end.",
+    "The examiner asks the questions aloud — they are not shown on screen. Answer by voice; the microphone opens automatically.",
+    "Part 2: you get a topic card and 1 minute to prepare (you can make notes), then speak for up to 2 minutes.",
+    "Part 3: the examiner's questions follow what you say. Use headphones and a quiet room.",
   ],
 };
 
@@ -1245,6 +1216,13 @@ async function retryMockPrep() {
 async function enterMockSection(section) {
   const btn = document.getElementById("mockEnterBtn");
   if (btn) { btn.disabled = true; btn.textContent = "Opening…"; }
+  if (section === "speaking") {
+    try { await examinerPrepare(); }
+    catch (e) {
+      if (btn) { btn.disabled = false; btn.textContent = "Try again"; }
+      return alert(`Microphone access is needed for the Speaking test. ${e.message || ""}`);
+    }
+  }
   if (section === "listening") {
     // Unlock audio with this click so later recordings may start automatically.
     mockAudioEl = mockAudioEl || new Audio();
@@ -1554,90 +1532,28 @@ function renderMockWriting(d) {
   startMockDeadline(d.timing.deadline, () => submitMockSection(true), "Writing time");
 }
 
-// ---------- Speaking (examiner mode comes in a later stage) ----------
+// ---------- Speaking (with the examiner) ----------
 
-function speakingPromptHTML(part, obj) {
-  if (part === 2) {
-    return `<p>${esc(obj.instructions || "")}</p>
-      <div class="alert alert-light"><strong>${esc(obj.cue_card || "")}</strong>
-      <ul class="mb-0">${(obj.bullet_points || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul></div>
-      <div class="small text-secondary">Preparation: ${esc(obj.preparation_seconds || 60)} sec · Speak: up to ${esc(obj.speaking_seconds || 120)} sec</div>`;
-  }
-  return `<p>${esc(obj.instructions || "")}</p><ol>${(obj.questions || []).map(q => `<li>${esc(q)}</li>`).join("")}</ol>`;
-}
-
-function renderMockSpeaking(d) {
+async function renderMockSpeaking(d) {
   const ws = document.getElementById("mockWorkspace");
-  const c = {};
-  d.parts.forEach(p => { c[`part${p.part}`] = p.content; });
-  ws.innerHTML = `
-    <h4>IELTS Speaking · Parts 1–3</h4>
-    <p class="text-secondary">Answer aloud. Record each part; the audio is transcribed and the complete interview is assessed together.</p>
-    ${[1, 2, 3].map(p => `
-      <div class="card-soft mb-3">
-        <h5>Part ${p}</h5>
-        ${speakingPromptHTML(p, c[`part${p}`] || {})}
-        <textarea id="mockSpeaking${p}" class="form-control mt-3" rows="${p === 2 ? 6 : 8}" placeholder="Transcript for Part ${p}…"></textarea>
-        <button id="mockSpeakBtn${p}" class="btn btn-outline-primary mt-2" onclick="recordMockSpeaking(${p})">🎙 Record Part ${p}</button>
-      </div>`).join("")}
-    <div class="d-flex justify-content-end"><button class="btn btn-primary" onclick="submitMockSpeaking()">Finish Speaking</button></div>
-    <div id="mockSpeakingResult" class="mt-3"></div>`;
+  ws.innerHTML = `<h4>IELTS Speaking · Parts 1–3</h4>
+    <p class="text-secondary small">Listen to the examiner and answer aloud. The microphone opens automatically when the examiner finishes.
+      You may ask the examiner to repeat a question.</p>
+    <div id="mockExaminer"></div>`;
   startMockDeadline(d.timing.deadline, null, "Speaking time");
-}
-
-async function recordMockSpeaking(part) {
-  const btn = document.getElementById(`mockSpeakBtn${part}`);
-  if (mockSpeakingRecorder && mockSpeakingRecorder.state === "recording") {
-    mockSpeakingRecorder.stop();
-    return;
-  }
-  if (!navigator.mediaDevices || !window.MediaRecorder) return alert("Audio recording is not supported in this browser.");
   try {
-    mockSpeakingStream = await navigator.mediaDevices.getUserMedia({audio: true});
-    const preferred = "audio/webm;codecs=opus";
-    mockSpeakingRecorder = new MediaRecorder(mockSpeakingStream, MediaRecorder.isTypeSupported(preferred) ? {mimeType: preferred} : {});
-    mockSpeakingChunks = [];
-    mockSpeakingRecorder.ondataavailable = e => { if (e.data?.size) mockSpeakingChunks.push(e.data); };
-    mockSpeakingRecorder.onstop = async () => {
-      btn.disabled = true; btn.textContent = "Transcribing…";
-      mockSpeakingStream?.getTracks().forEach(t => t.stop());
-      try {
-        const blob = new Blob(mockSpeakingChunks, {type: mockSpeakingRecorder.mimeType || "audio/webm"});
-        const form = new FormData();
-        form.append("audio", blob, `ielts-mock-speaking-${part}.webm`);
-        form.append("scenario", `Full IELTS Mock Speaking Part ${part}`);
-        const d = await apiForm("/api/audio/transcribe", form);
-        document.getElementById(`mockSpeaking${part}`).value = d.transcript;
-      } catch (e) { alert(e.message); }
-      finally {
-        btn.disabled = false; btn.textContent = `🎙 Record Part ${part}`;
-        mockSpeakingRecorder = null; mockSpeakingChunks = [];
-      }
-    };
-    mockSpeakingRecorder.start();
-    btn.textContent = "⏹ Stop recording";
-    const limit = part === 2 ? 130000 : 300000;
-    setTimeout(() => { if (mockSpeakingRecorder?.state === "recording") mockSpeakingRecorder.stop(); }, limit);
-  } catch (e) { alert("Microphone access failed."); }
-}
-
-async function submitMockSpeaking() {
-  const transcripts = {
-    "1": document.getElementById("mockSpeaking1").value.trim(),
-    "2": document.getElementById("mockSpeaking2").value.trim(),
-    "3": document.getElementById("mockSpeaking3").value.trim()
-  };
-  if (Object.values(transcripts).some(x => !x)) return alert("Complete all three Speaking parts.");
-  const el = document.getElementById("mockSpeakingResult");
-  el.innerHTML = `<div class="loader">Submitting the Speaking test…</div>`;
-  try {
-    fullMock = await api(`/api/ielts/mock/${fullMock.mock_id}/speaking/submit`, {
-      method: "POST", body: JSON.stringify({transcripts})
-    });
+    const first = await api(`/api/ielts/mock/${fullMock.mock_id}/speaking/turn`, {method: "POST", body: "{}"});
+    await runExaminer(document.getElementById("mockExaminer"), first, `/api/ielts/mock/${fullMock.mock_id}/speaking/answer`);
+    examinerRelease();
+    ws.insertAdjacentHTML("beforeend", `<div class="loader mt-3">Submitting the Speaking test…</div>`);
+    fullMock = await api(`/api/ielts/mock/${fullMock.mock_id}/speaking/submit`, {method: "POST", body: "{}"});
     stopMockTimers();
     mockSection = null;
     routeMock();
-  } catch (e) { el.innerHTML = `<div class="alert alert-danger">${esc(e.message)}</div>`; }
+  } catch (e) {
+    ws.insertAdjacentHTML("beforeend", `<div class="alert alert-danger mt-3">${esc(e.message)}
+      <button class="btn btn-sm btn-outline-danger ms-2" onclick="location.reload()">Reload</button></div>`);
+  }
 }
 
 // ---------- Results ----------
@@ -1677,6 +1593,7 @@ async function finishFullIELTSMock() {
     const b = d.bands || {};
     const w = d.review?.writing || {};
     const sp = d.review?.speaking?.["1"]?.result || {};
+    const spText = [1, 2, 3].map(p => d.review?.speaking?.[String(p)]?.transcript).filter(Boolean).join("\n\n");
     ws.innerHTML = `
       <div class="text-center mb-4">
         <div class="small text-secondary">PRACTICE OVERALL BAND</div>
@@ -1700,6 +1617,7 @@ async function finishFullIELTSMock() {
       </div>
       <div class="card-soft mb-3"><h5>Speaking</h5>
         ${(sp.improvements || []).map(x => `<div class="small mb-1"><strong>${esc(x.criterion)}:</strong> ${esc(x.issue)} — <span class="text-secondary">${esc(x.action)}</span></div>`).join("") || '<div class="small text-secondary">No feedback.</div>'}
+        ${spText ? `<details class="mt-2"><summary>Transcript of the interview</summary><div class="small mt-2" style="white-space:pre-line">${esc(spText)}</div></details>` : ""}
       </div>
       <button class="btn btn-primary" onclick="resetFullIELTSMock()">Start another full mock</button>
       <button class="btn btn-outline-primary ms-2" onclick="openPage('ielts-dashboard')">IELTS Dashboard</button>`;
@@ -2202,4 +2120,179 @@ function renderTask1Chart(containerId, chart) {
   const draw = {bar: t1Bar, line: t1Line, pie: t1Pie, table: t1Table, process: t1Process, map: t1Map}[chart.type];
   el.innerHTML = `<div class="t1-visual">${chart.title ? `<div class="fw-semibold text-center mb-2">${esc(chart.title)}</div>` : ""}
     ${draw ? draw(chart) : ""}</div>`;
+}
+
+
+/* ===================== IELTS Speaking examiner (shared by practice and full mock) ===================== */
+// The examiner's questions are heard, not shown (as in the exam). The microphone opens when the
+// examiner finishes; the answer stops at the time limit or when the candidate presses "Finished".
+
+let examinerAudio = null;
+let examinerStream = null;
+let examinerStop = null;      // stops the current recording early
+
+async function examinerPrepare() {
+  // Call from a click: unlocks audio playback and asks for the microphone once.
+  examinerAudio = examinerAudio || new Audio();
+  examinerAudio.muted = true;
+  examinerAudio.play().catch(() => {});
+  examinerAudio.pause();
+  examinerAudio.muted = false;
+  if (!navigator.mediaDevices || !window.MediaRecorder) throw new Error("Audio recording is not supported in this browser.");
+  if (!examinerStream || examinerStream.getTracks().every(t => t.readyState === "ended")) {
+    examinerStream = await navigator.mediaDevices.getUserMedia({audio: true});
+  }
+}
+
+function examinerRelease() {
+  examinerStream?.getTracks().forEach(t => t.stop());
+  examinerStream = null;
+}
+
+function examinerPlay(b64) {
+  return new Promise(resolve => {
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], {type: "audio/mpeg"}));
+    const a = examinerAudio || new Audio();
+    a.onended = () => { URL.revokeObjectURL(url); resolve(); };
+    a.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+    a.src = url;
+    a.play().catch(() => resolve());
+  });
+}
+
+function examinerUI(container) {
+  container.innerHTML = `
+    <div class="examiner-box">
+      <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div><span class="badge text-bg-primary" id="exPart">Part 1</span>
+             <strong class="ms-2" id="exStatus">Starting…</strong></div>
+        <div class="fw-semibold" id="exClock"></div>
+      </div>
+      <div class="progress mt-2" style="height:6px"><div id="exBar" class="progress-bar" style="width:0%"></div></div>
+      <div id="exCue" class="mt-3"></div>
+      <div class="d-flex gap-2 mt-3">
+        <button id="exFinish" class="btn btn-primary d-none">I've finished my answer</button>
+        <button id="exRepeat" class="btn btn-outline-secondary d-none">↻ Could you repeat the question?</button>
+      </div>
+      <div id="exError" class="mt-2"></div>
+    </div>`;
+  return {
+    status: (t) => { container.querySelector("#exStatus").textContent = t; },
+    part: (p) => { container.querySelector("#exPart").textContent = `Part ${p}`; },
+    clock: (t) => { container.querySelector("#exClock").textContent = t; },
+    bar: (pct) => { container.querySelector("#exBar").style.width = `${pct}%`; },
+    cue: (html) => { container.querySelector("#exCue").innerHTML = html; },
+    btn: (id) => container.querySelector(id),
+    error: (html) => { container.querySelector("#exError").innerHTML = html; },
+  };
+}
+
+function examinerCountdown(ui, seconds, label) {
+  return new Promise(resolve => {
+    const end = Date.now() + seconds * 1000;
+    ui.status(label);
+    const tick = () => {
+      const left = (end - Date.now()) / 1000;
+      ui.clock(mockFmt(left));
+      ui.bar(100 - Math.max(0, left) / seconds * 100);
+      if (left <= 0) return resolve();
+      setTimeout(tick, 200);
+    };
+    tick();
+  });
+}
+
+// Records one answer; resolves with {blob, seconds, repeat}.
+function examinerRecord(ui, maxSeconds, allowRepeat) {
+  return new Promise(resolve => {
+    const preferred = "audio/webm;codecs=opus";
+    const rec = new MediaRecorder(examinerStream, MediaRecorder.isTypeSupported(preferred) ? {mimeType: preferred} : {});
+    const chunks = [];
+    const started = Date.now();
+    let repeat = false, timer = null;
+    rec.ondataavailable = e => { if (e.data?.size) chunks.push(e.data); };
+    rec.onstop = () => {
+      clearTimeout(timer);
+      ui.btn("#exFinish").classList.add("d-none");
+      ui.btn("#exRepeat").classList.add("d-none");
+      resolve({blob: new Blob(chunks, {type: rec.mimeType || "audio/webm"}), seconds: (Date.now() - started) / 1000, repeat});
+    };
+    const fin = ui.btn("#exFinish"), rep = ui.btn("#exRepeat");
+    fin.classList.remove("d-none");
+    fin.onclick = () => rec.state === "recording" && rec.stop();
+    rep.classList.toggle("d-none", !allowRepeat);
+    rep.onclick = () => { repeat = true; if (rec.state === "recording") rec.stop(); };
+    examinerStop = () => rec.state === "recording" && rec.stop();
+    rec.start(1000);
+    ui.status("Your answer — speak now 🎙");
+    const tick = () => {
+      if (rec.state !== "recording") return;
+      const used = (Date.now() - started) / 1000;
+      ui.clock(mockFmt(maxSeconds - used));
+      ui.bar(Math.min(100, used / maxSeconds * 100));
+      if (used >= maxSeconds) return rec.stop();
+      timer = setTimeout(tick, 200);
+    };
+    tick();
+  });
+}
+
+async function examinerUpload(url, turnId, rec) {
+  const form = new FormData();
+  form.append("turn_id", turnId);
+  form.append("seconds", String(Math.round(rec.seconds)));
+  form.append("audio", rec.blob, `${turnId}.webm`);
+  return apiForm(url, form);
+}
+
+// Runs the whole examiner conversation. reply = {turn, done}; answerUrl = endpoint for answers.
+async function runExaminer(container, firstReply, answerUrl) {
+  const ui = examinerUI(container);
+  let reply = firstReply;
+  while (true) {
+    const t = reply.turn;
+    ui.part(t.part);
+    ui.error("");
+    ui.cue("");
+    ui.clock("");
+    ui.bar(0);
+    ui.status("Examiner is speaking…");
+    await examinerPlay(t.audio);
+    if (t.kind === "end") { ui.status("The Speaking test is over."); return; }
+
+    if (t.kind === "cue_card") {
+      ui.cue(`<div class="cue-card"><strong>${esc(t.cue_card || "")}</strong>
+          <div class="small mt-2">You should say:</div>
+          <ul class="mb-2">${(t.bullet_points || []).map(b => `<li>${esc(b)}</li>`).join("")}</ul></div>
+        <textarea class="form-control mt-2" rows="4" placeholder="Notes (only for you — they are not sent)"></textarea>`);
+      await examinerCountdown(ui, t.prep_seconds || 60, "Preparation time — make notes");
+      ui.status("Examiner is speaking…");
+      ui.clock("");
+      await examinerPlay(t.go_audio);
+    }
+
+    let rec;
+    while (true) {
+      rec = await examinerRecord(ui, t.answer_seconds || 45, t.kind === "question");
+      if (!rec.repeat) break;
+      ui.status("Examiner is repeating the question…");
+      await examinerPlay(t.audio);
+    }
+    ui.status("Please wait…");
+    ui.clock("");
+    for (let attempt = 0; ; attempt++) {
+      try {
+        reply = await examinerUpload(answerUrl, t.id, rec);
+        break;
+      } catch (e) {
+        if (attempt >= 1) {
+          ui.error(`<div class="alert alert-danger small mb-0">${esc(e.message)}
+            <button class="btn btn-sm btn-outline-danger ms-2" id="exRetry">Try again</button></div>`);
+          await new Promise(r => { container.querySelector("#exRetry").onclick = r; });
+          ui.error("");
+        }
+      }
+    }
+  }
 }

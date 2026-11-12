@@ -82,8 +82,10 @@ def generate_speaking_set(part: int) -> dict:
     part = min(3, max(1, int(part)))
     instructions = """
 Create original IELTS-style Speaking preparation material; do not reproduce published test questions.
-Return JSON with exactly: part, title, instructions, questions, preparation_seconds, speaking_seconds.
-questions must be an array of strings. For Part 1 give 5 familiar-topic questions. For Part 2 give one cue-card style prompt with 4 bullet prompts. For Part 3 give 5 abstract follow-up questions related to a plausible Part 2 topic.
+Return JSON with exactly: part, title, instructions, questions, cue_card, bullet_points.
+For Part 1: questions = 8 familiar-topic questions on 2-3 topics (e.g. work/study, home town, a hobby); cue_card "" and bullet_points [].
+For Part 2: cue_card = the task ("Describe a ..."), bullet_points = exactly 4 short prompts without the words "You should say" (e.g. "where you went", ..., and the last one "and explain why ..."); questions [].
+For Part 3: questions = 6 abstract discussion questions related to a plausible Part 2 topic; cue_card should name that topic in a few words; bullet_points [].
 """
     return ask_json(instructions, f"Speaking Part {part}. {EXAM_LEVEL}")
 
