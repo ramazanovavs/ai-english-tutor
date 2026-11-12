@@ -116,6 +116,10 @@ def assess(recordings: list[bytes], transcript: str = "", language: str = "en") 
     last = None
     for model in models:
         try:
+            from app.services import ai_gateway
+            import time as _time
+            ai_gateway.check("audio")
+            _started = _time.monotonic()
             response = client.chat.completions.create(
                 model=model,
                 modalities=["text"],
@@ -132,6 +136,9 @@ def assess(recordings: list[bytes], transcript: str = "", language: str = "en") 
             data["pronunciation"] = max(1, criterion(data.get("pronunciation")))
             data["sample_seconds"] = round(seconds)
             data["model"] = model
+            u = getattr(response, "usage", None)
+            ai_gateway.log("audio", model, ok=True, started=_started, units=round(seconds),
+                           input_tokens=getattr(u, "prompt_tokens", None), output_tokens=getattr(u, "completion_tokens", None))
             return data
         except Exception as exc:
             last = exc

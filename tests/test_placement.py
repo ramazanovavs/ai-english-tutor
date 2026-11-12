@@ -108,13 +108,27 @@ def test_full_placement(client, ai, monkeypatch, db, fixture_bytes):
     assert skills["writing"]["level"] == "B2"
 
 
-def test_roadmap_evidence(client, db):
-    item = rm.ITEMS_BY_ID["B1.2-g1"]
-    r = client.post("/api/roadmap/evidence", json={"item_id": item["id"], "module": "test", "score": 60}).json()
-    assert r["status"] == "practised"
-    r = client.post("/api/roadmap/evidence", json={"item_id": item["id"], "module": "test", "score": 80}).json()
-    assert r["confirmed"] and r["attempts"] == 2
-    w = client.post("/api/roadmap/evidence", json={"item_id": "B2.1-w1", "module": "writing", "score": 75, "level": "B1"}).json()
-    assert not w["confirmed"]
+def test_roadmap_evidence_is_computed_on_the_server(client, ai, db):
+    """A skill is confirmed only from a result the server computed, at the item's own level."""
+    ai.json(lambda i, u: {"title": "T", "level": "B1", "questions": [
+        {"id": i, "skill": "grammar", "question": f"q{i}", "options": ["a", "b", "c", "d"], "answer_index": 0,
+         "explanation": "e"} for i in range(1, 6)]})
+    t = client.post("/api/test/generate", json={"level": "B1", "focus": "grammar: Past Continuous"}).json()
+    assert all("answer_index" not in q for q in t["questions"])           # the key stays on the server
+    r = client.post("/api/test/submit", json={"test_id": t["test_id"], "answers": {"1": 0, "2": 0, "3": 1},
+                                               "roadmap_item": "B1.2-g1"}).json()
+    assert r["score"] == 40 and r["roadmap"]["status"] == "practised"
+    again = client.post("/api/test/submit", json={"test_id": t["test_id"], "answers": {}})
+    assert again.status_code == 409                                       # one check per test
+    t = client.post("/api/test/generate", json={"level": "B1", "focus": "x"}).json()
+    r = client.post("/api/test/submit", json={"test_id": t["test_id"], "answers": {str(i): 0 for i in range(1, 6)},
+                                               "roadmap_item": "B1.2-g1"}).json()
+    assert r["roadmap"]["confirmed"] and r["roadmap"]["attempts"] == 2
+    # a B1 test cannot confirm a C1 skill, and the old "send me a score" endpoint is gone
+    t = client.post("/api/test/generate", json={"level": "B1", "focus": "x"}).json()
+    r = client.post("/api/test/submit", json={"test_id": t["test_id"], "answers": {str(i): 0 for i in range(1, 6)},
+                                               "roadmap_item": "C1.1-g1"}).json()
+    assert r["roadmap"] is None
+    assert client.post("/api/roadmap/evidence", json={"item_id": "B1.2-g1", "module": "test", "score": 100}).status_code in (404, 405)
     assert client.post("/api/profile/language", json={"language": "kk"}).json() == {"language": "kk"}
     assert client.get("/api/roadmap").json()["language"] == "kk"

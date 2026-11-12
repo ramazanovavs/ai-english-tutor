@@ -150,6 +150,7 @@ def db(monkeypatch):
     fake = FakeDB()
     fake.tables["ielts_profiles"] = [{"id": "p1", "user_id": "u1", "exam_type": "Academic"}]
     fake.tables["profiles"] = [{"id": "u1", "preferred_explanation_language": "en"}]
+    fake.tables["user_consents"] = [{"user_id": "u1", "terms_version": "2026-11", "voice": True}]
 
     def offline(*a, **k):
         raise RuntimeError("OpenAI is switched off in tests")
@@ -162,6 +163,11 @@ def db(monkeypatch):
                 monkeypatch.setattr(m, fn, offline)
     import app.services.ielts_pronunciation as pron
     monkeypatch.setattr(pron, "client", None)   # pronunciation falls back to "not assessed"
+    import app.routes.api as api_module
+    api_module._consent_cache.clear()
+    import app.services.ai_gateway as gw
+    gw._burst.clear()
+    gw._day["date"] = None
     import app.services.storage_cleanup as sc
     monkeypatch.setattr(sc, "maybe_run_in_background", lambda: None)
     return fake

@@ -172,3 +172,9 @@ pre.feedback { white-space: pre-wrap; font-family: inherit; margin: 0; }
 .fb-stars button.on { color: #f59e0b; }
 .fb-item { border-bottom: 1px solid #f1f5f9; padding: 10px 0; }
 @media (max-width: 991px) { .feedback-fab { left: auto; right: 16px; bottom: 16px; } }
+
+/* Consent window */
+.consent-overlay { position: fixed; inset: 0; z-index: 3000; background: rgba(15, 23, 42, .55); display: flex;
+                   align-items: center; justify-content: center; padding: 16px; }
+.consent-box { max-width: 720px; width: 100%; max-height: 92vh; overflow-y: auto; background: #fff; }
+.consent-focus { background: #fef9c3; border-radius: 8px; padding: 6px 6px 6px 30px; }

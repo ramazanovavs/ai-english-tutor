@@ -28,7 +28,8 @@ def require_user(authorization: str | None = Header(default=None)) -> dict:
         user = result.user
         if not user:
             raise HTTPException(status_code=401, detail="Invalid session.")
-        return {"id": str(user.id), "email": user.email}
+        confirmed = bool(getattr(user, "email_confirmed_at", None) or getattr(user, "confirmed_at", None))
+        return {"id": str(user.id), "email": user.email, "email_confirmed": confirmed}
     except HTTPException:
         raise
     except Exception:

@@ -17,8 +17,22 @@ class Settings(BaseSettings):
     supabase_anon_key: str
     supabase_service_role_key: str
 
-    # Comma-separated emails allowed to use admin tools (e.g. filling the Listening backup bank).
+    # Admins: Supabase user IDs (preferred). Emails count only once the address is confirmed in Supabase.
+    admin_user_ids: str = ""
     admin_emails: str = ""
+
+    # AI gateway limits (protect the OpenAI bill); tune in the Render environment.
+    ai_user_calls_per_10min: int = 60
+    ai_user_calls_per_day: int = 400
+    ai_user_tts_chars_per_day: int = 60000
+    ai_daily_calls_limit: int = 6000
+    # Approximate prices in USD for the cost column of the AI journal (check current OpenAI prices).
+    ai_price_input_per_m: float = 1.25
+    ai_price_output_per_m: float = 10.0
+    ai_price_tts_per_m_chars: float = 15.0
+    ai_price_stt_per_minute: float = 0.003
+    # Requests per minute per user to the whole API (all endpoints).
+    api_requests_per_minute: int = 240
 
     model_config = SettingsConfigDict(
         env_file=".env",

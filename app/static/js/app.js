@@ -25,10 +25,19 @@ async function api(path, options = {}) {
   };
   const res = await fetch(path, {...options, headers});
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
+  if (!res.ok) throw new Error(apiErrorText(res.status, data));
   return data;
 }
 
+
+function apiErrorText(status, data) {
+  const detail = String(data.detail || `Request failed (${status})`);
+  if (status === 403 && detail.startsWith("VOICE_CONSENT_REQUIRED")) {
+    if (typeof openConsent === "function") openConsent(true);
+    return typeof T === "function" ? T("cs_voice_needed") : detail;
+  }
+  return detail;
+}
 
 async function apiForm(path, formData) {
   if (!currentSession) throw new Error("Please sign in.");
@@ -38,7 +47,7 @@ async function apiForm(path, formData) {
     body: formData
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
+  if (!res.ok) throw new Error(apiErrorText(res.status, data));
   return data;
 }
 
@@ -572,10 +581,10 @@ async function submitVocabPractice() {
       method:"POST",
       body:JSON.stringify({
         test_id: currentVocabPractice.test_id,
-        answers
+        answers, roadmap_item: roadmapItemFor("vocabulary")
       })
     });
-    roadmapReport("vocabulary", d.score);
+    roadmapReport("vocabulary", d.roadmap);
 
     for (const item of (d.details || [])) {
       const el = document.getElementById(`vocab_feedback_${item.id}`);
@@ -618,8 +627,8 @@ async function checkWriting() {
   if (!text) return;
   loading("writingResult", T("w_loading"));
   try {
-    const d = await api("/api/writing", {method:"POST", body:JSON.stringify({text, purpose})});
-    roadmapReport("writing", d.score, d.estimated_level);
+    const d = await api("/api/writing", {method:"POST", body:JSON.stringify({text, purpose, roadmap_item: roadmapItemFor("writing")})});
+    roadmapReport("writing", d.roadmap);
     document.getElementById("writingResult").innerHTML = `
       <h4>${esc(d.score)}% · ${esc(T("approx"))} ${esc(d.estimated_level)}</h4>
       <h6>${esc(T("strengths"))}</h6><ul>${(d.strengths || []).map(x=>`<li>${esc(x)}</li>`).join("")}</ul>
@@ -704,8 +713,9 @@ async function checkSpeaking() {
     form.append("text", text);
     form.append("scenario", scenario);
     if (speakingAudioBlob) form.append("audio", speakingAudioBlob, "answer.webm");
+    if (roadmapItemFor("speaking")) form.append("roadmap_item", roadmapItemFor("speaking"));
     const d = await apiForm("/api/speaking/full", form);
-    roadmapReport("speaking", d.practice_score, d.estimated_level);
+    roadmapReport("speaking", d.roadmap);
 
     document.getElementById("speakingResult").innerHTML = `
       <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
@@ -769,14 +779,9 @@ async function submitTest() {
   try {
     const d = await api("/api/test/submit", {
       method:"POST",
-      body:JSON.stringify({
-        title: currentTest.title,
-        level: currentTest.level,
-        questions: currentTest.questions,
-        answers
-      })
+      body:JSON.stringify({test_id: currentTest.test_id, answers, roadmap_item: roadmapItemFor("test")})
     });
-    roadmapReport("test", d.score);
+    roadmapReport("test", d.roadmap);
     const mastery = d.mastery_status
       ? d.mastery_status.charAt(0).toUpperCase() + d.mastery_status.slice(1)
       : "";
@@ -2011,10 +2016,10 @@ async function submitListening() {
   try {
     const d = await api("/api/listening/submit", {
       method: "POST",
-      body: JSON.stringify({test_id: currentListening.test_id, answers})
+      body: JSON.stringify({test_id: currentListening.test_id, answers, roadmap_item: roadmapItemFor("listening")})
     });
     listeningChecked = true;
-    roadmapReport("listening", d.score);
+    roadmapReport("listening", d.roadmap);
 
     for (const item of (d.details || [])) {
       const el = document.getElementById(`listen_feedback_${item.id}`);
@@ -3398,14 +3403,17 @@ function renderRoadmapTaskBanner(page) {
       <button class="btn btn-sm btn-light" onclick="roadmapContext=null;openPage('roadmap')">${esc(T("back_to_path"))}</button></div>`);
 }
 
-async function roadmapReport(module, score, level) {
+// The server confirms a skill from the result it computed itself; the browser only says which skill was trained.
+function roadmapItemFor(module) {
+  return roadmapContext && roadmapContext.module === module ? roadmapContext.item_id : null;
+}
+
+function roadmapReport(module, result) {
   if (!roadmapContext || roadmapContext.module !== module) return;
   const ctx = roadmapContext;
   roadmapContext = null;
-  try {
-    const r = await api("/api/roadmap/evidence", {method: "POST", body: JSON.stringify({item_id: ctx.item_id, module, score, level: level || null})});
-    rmToast(r.confirmed ? `${T("toast_confirmed")}: ${rmText(ctx.text)}` : T("toast_practised", {l: ctx.level}));
-  } catch (e) { rmToast(e.message); }
+  if (!result) return;
+  rmToast(result.confirmed ? `${T("toast_confirmed")}: ${rmText(ctx.text)}` : T("toast_practised", {l: ctx.level}));
 }
 
 // ========================= Today, word review (spaced repetition) and my mistakes =========================
@@ -3836,9 +3844,9 @@ async function submitReading() {
   const btn = document.getElementById("readingSubmitBtn");
   btn.disabled = true;
   try {
-    const d = await api("/api/reading/submit", {method: "POST", body: JSON.stringify({test_id: currentReading.test_id, answers})});
+    const d = await api("/api/reading/submit", {method: "POST", body: JSON.stringify({test_id: currentReading.test_id, answers, roadmap_item: roadmapItemFor("reading")})});
     currentReading.result = d;
-    roadmapReport("reading", d.score);
+    roadmapReport("reading", d.roadmap);
     renderReading(d);
     loadProfile();
   } catch (e) { btn.disabled = false; rmToast(e.message); }
@@ -3932,6 +3940,7 @@ async function loadFeedback() {
   renderFeedback([]);
   try { const d = await api("/api/feedback/mine"); renderFeedback(d.items || []); } catch (e) {}
   if (currentProfile?.is_admin) loadFeedbackAdmin();
+  if (currentProfile?.is_admin) loadAIUsageAdmin();
 }
 
 function renderFeedback(mine) {
@@ -3941,7 +3950,8 @@ function renderFeedback(mine) {
   const pre = sections.some(s => s.value === feedbackFromPage) ? feedbackFromPage : "general";
   const st = s => T("fb_st_" + (s || "new"));
   document.getElementById("feedbackRoot").innerHTML = `
-    <h2>${esc(T("fb_title"))}</h2>
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2"><h2>${esc(T("fb_title"))}</h2>
+      <button class="btn btn-sm btn-outline-secondary" onclick="openConsent(false)">🔒 ${esc(T("cs_manage"))}</button></div>
     <p class="text-secondary">${esc(T("fb_intro"))}</p>
     <div class="card-soft">
       <div class="row g-3">
@@ -3962,7 +3972,7 @@ function renderFeedback(mine) {
     <div class="card-soft mt-4"><h5>${esc(T("fb_mine"))}</h5>
       ${mine.length ? mine.map(m => `<div class="fb-item"><div class="small text-secondary">${esc(fmtDate(m.created_at))} · ${esc(m.section)} · ${esc(T("fb_kind_" + m.kind).split(" — ")[0])}${m.rating ? " · " + "★".repeat(m.rating) : ""} · <span class="badge text-bg-light">${esc(st(m.status))}</span></div>
         <div style="white-space:pre-line">${esc(m.comment)}</div></div>`).join("") : `<div class="text-secondary">${esc(T("fb_none"))}</div>`}</div>
-    <div id="feedbackAdmin"></div>`;
+    <div id="feedbackAdmin"></div><div id="aiUsageAdmin"></div>`;
   feedbackRating = 0;
   setFeedbackRating(0);
   if (feedbackAdmin) renderFeedbackAdmin();
@@ -4033,4 +4043,93 @@ async function downloadFeedbackCsv() {
     a.download = `feedback_${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
   } catch (e) { rmToast(e.message); }
+}
+
+// ========================= Consent: terms, personal data and voice recordings =========================
+let consentState = null;
+Object.assign(RM_T, {
+  cs_title: {ru: "Условия использования и согласие", kk: "Пайдалану шарттары және келісім", en: "Terms of use and consent"},
+  cs_intro: {ru: "Перед началом работы, пожалуйста, прочитайте коротко, как устроен сайт и что происходит с вашими данными.", kk: "Жұмысты бастамас бұрын сайттың қалай жұмыс істейтінін және деректеріңізбен не болатынын қысқаша оқыңыз.", en: "Before you start, please read briefly how the site works and what happens to your data."},
+  cs_points: {
+    ru: ["Сайт — учебный проект ЗКУ им. М. Утемисова для изучения английского языка, работает в режиме тестирования.",
+         "Задания, проверку и объяснения создаёт искусственный интеллект (модели OpenAI). Оценки ИИ — учебные и ориентировочные; это не официальные результаты CEFR или IELTS. ИИ может ошибаться.",
+         "Мы храним: email, ваши ответы, тексты, результаты и уровень. Тексты и ответы передаются в OpenAI (США) для проверки; OpenAI не использует данные API для обучения моделей по умолчанию.",
+         "Записи голоса нужны только для говорения и оценки произношения: они передаются в OpenAI и хранятся не более 30 дней, затем удаляются автоматически.",
+         "Не вводите в задания паспортные данные, телефоны, адреса и другую лишнюю личную информацию.",
+         "Запрещено пытаться обойти проверку, получить чужие данные или ответы, перегружать сайт запросами.",
+         "Вы можете в любой момент отозвать согласие и попросить удалить данные через «Обратную связь»."],
+    kk: ["Сайт — М. Өтемісов атындағы БҚУ-дың ағылшын тілін үйренуге арналған оқу жобасы, сынақ режимінде жұмыс істейді.",
+         "Тапсырмаларды, тексеру мен түсіндірмелерді жасанды интеллект (OpenAI модельдері) жасайды. ЖИ бағалары оқу және болжамды сипатта; бұл CEFR немесе IELTS ресми нәтижелері емес. ЖИ қателесуі мүмкін.",
+         "Біз сақтаймыз: email, жауаптарыңыз, мәтіндеріңіз, нәтижелеріңіз бен деңгейіңіз. Мәтіндер мен жауаптар тексеру үшін OpenAI-ға (АҚШ) жіберіледі; OpenAI әдепкі бойынша API деректерін модельдерді оқытуға пайдаланбайды.",
+         "Дауыс жазбалары тек айтылым мен сөйлеуді бағалау үшін қажет: олар OpenAI-ға жіберіледі және 30 күннен аспай сақталып, кейін автоматты түрде жойылады.",
+         "Тапсырмаларға паспорт деректерін, телефон, мекенжай және басқа артық жеке ақпаратты енгізбеңіз.",
+         "Тексеруді айналып өтуге, басқалардың деректерін не жауаптарын алуға, сайтты сұраныстармен шамадан тыс жүктеуге тыйым салынады.",
+         "Келісімді кез келген уақытта қайтарып алып, деректерді жоюды «Кері байланыс» арқылы сұрай аласыз."],
+    en: ["The site is a learning project of M. Utemisov West Kazakhstan University for English, currently in testing.",
+         "Tasks, checking and explanations are produced by artificial intelligence (OpenAI models). AI scores are practice estimates, not official CEFR or IELTS results. AI can make mistakes.",
+         "We store your email, answers, texts, results and level. Texts and answers are sent to OpenAI (USA) for checking; OpenAI does not use API data to train models by default.",
+         "Voice recordings are used only for speaking and pronunciation: they are sent to OpenAI and kept for no more than 30 days, then deleted automatically.",
+         "Do not type passport details, phone numbers, addresses or other unnecessary personal information into tasks.",
+         "Do not try to bypass checking, obtain other people's data or answers, or overload the site with requests.",
+         "You can withdraw your consent and ask to delete your data at any time through Feedback."]},
+  cs_terms: {ru: "Я принимаю условия использования и даю согласие на сбор и обработку моих персональных данных для обучения на сайте (обязательно)", kk: "Пайдалану шарттарын қабылдаймын және сайтта оқу үшін дербес деректерімді жинауға және өңдеуге келісім беремін (міндетті)", en: "I accept the terms of use and consent to the collection and processing of my personal data for learning on the site (required)"},
+  cs_voice: {ru: "Я согласен(на) на запись и обработку моего голоса для заданий по говорению и оценки произношения (можно дать позже)", kk: "Айтылым тапсырмалары мен сөйлеуді бағалау үшін дауысымды жазуға және өңдеуге келісемін (кейін беруге болады)", en: "I agree to the recording and processing of my voice for speaking tasks and pronunciation (can be given later)"},
+  cs_accept: {ru: "Продолжить", kk: "Жалғастыру", en: "Continue"},
+  cs_voice_needed: {ru: "Для записи голоса нужно согласие на обработку записей — отметьте его в открывшемся окне.", kk: "Дауыс жазу үшін жазбаларды өңдеуге келісім қажет — ашылған терезеде белгілеңіз.", en: "Voice recording needs your consent — tick it in the window that opened."},
+  cs_manage: {ru: "Согласие на обработку данных", kk: "Деректерді өңдеуге келісім", en: "Data consent"},
+});
+
+async function checkConsent() {
+  try { consentState = await api("/api/consent"); } catch (e) { return; }   // not set up yet: do not block
+  if (!consentState.terms) openConsent(false);
+}
+
+function openConsent(voiceFocus) {
+  document.getElementById("consentOverlay")?.remove();
+  const pts = (RM_T.cs_points[uiLang()] || RM_T.cs_points.ru);
+  const voice = consentState?.voice;
+  document.body.insertAdjacentHTML("beforeend", `<div id="consentOverlay" class="consent-overlay"><div class="consent-box card-soft">
+    <h4>${esc(T("cs_title"))}</h4><p class="small text-secondary">${esc(T("cs_intro"))}</p>
+    <ol class="small">${pts.map(p => `<li class="mb-1">${esc(p)}</li>`).join("")}</ol>
+    <div class="form-check mb-2"><input class="form-check-input" type="checkbox" id="csTerms" ${consentState?.terms ? "checked" : ""}>
+      <label class="form-check-label" for="csTerms">${esc(T("cs_terms"))}</label></div>
+    <div class="form-check mb-3 ${voiceFocus ? "consent-focus" : ""}"><input class="form-check-input" type="checkbox" id="csVoice" ${voice ? "checked" : ""}>
+      <label class="form-check-label" for="csVoice">${esc(T("cs_voice"))}</label></div>
+    <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap">
+      <select class="form-select form-select-sm w-auto" onchange="setUiLang(this.value).then(() => openConsent(${voiceFocus ? "true" : "false"}))">
+        ${["ru", "kk", "en"].map(l => `<option value="${l}" ${uiLang() === l ? "selected" : ""}>${l === "kk" ? "KZ" : l.toUpperCase()}</option>`).join("")}</select>
+      <button id="csBtn" class="btn btn-primary" onclick="saveConsent()" ${consentState?.terms ? "" : "disabled"}>${esc(T("cs_accept"))}</button></div>
+  </div></div>`);
+  document.getElementById("csTerms").addEventListener("change", e => { document.getElementById("csBtn").disabled = !e.target.checked; });
+}
+
+async function saveConsent() {
+  try {
+    consentState = await api("/api/consent", {method: "POST", body: JSON.stringify({
+      terms: document.getElementById("csTerms").checked, voice: document.getElementById("csVoice").checked})});
+    document.getElementById("consentOverlay")?.remove();
+  } catch (e) { rmToast(e.message); }
+}
+
+(function consentOnStart() {
+  const original = showApp;
+  showApp = async function () { await original(); checkConsent(); };
+})();
+
+// ========================= Admin: AI journal (calls, cost, limits) =========================
+async function loadAIUsageAdmin() {
+  const box = document.getElementById("aiUsageAdmin");
+  if (!box || !currentProfile?.is_admin) return;
+  let d;
+  try { d = await api("/api/admin/ai-usage"); } catch (e) { box.innerHTML = ""; return; }
+  if (d.error) { box.innerHTML = `<div class="alert alert-warning mt-4">${esc(d.error)}</div>`; return; }
+  const days = d.days || [];
+  box.innerHTML = `<div class="card-soft mt-4"><h5>AI journal <span class="badge text-bg-secondary">admin</span></h5>
+    <div class="small text-secondary mb-2">Your user ID (put it in ADMIN_USER_IDS on Render): <code>${esc(currentProfile.user_id || "")}</code></div>
+    <div class="small mb-2">Today: ${esc(d.today.calls_total)} AI calls since the last restart (site limit ${esc(d.today.limit_total)}/day).
+      Per user: ${esc(d.limits.ai_user_calls_per_10min)}/10 min, ${esc(d.limits.ai_user_calls_per_day)}/day, ${esc(d.limits.ai_user_tts_chars_per_day)} voiced characters/day.</div>
+    <table class="table table-sm"><thead><tr><th>Date</th><th>AI calls</th><th>Errors</th><th>≈ cost, $</th></tr></thead><tbody>
+      ${days.slice(0, 14).map(x => `<tr><td>${esc(x.date)}</td><td>${esc(x.calls)}</td><td>${esc(x.errors)}</td><td>${esc(x.cost)}</td></tr>`).join("")}</tbody></table>
+    <h6>Most active today</h6>${(d.top_users_today || []).map(u => `<div class="small">${esc(u.user)} — ${esc(u.calls)} calls, ≈ $${esc(u.cost)}</div>`).join("") || '<div class="small text-secondary">—</div>'}
+    <div class="small text-secondary mt-2">Cost is an estimate from the prices in the settings; the exact bill is in the OpenAI dashboard.</div></div>`;
 }

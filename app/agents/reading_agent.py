@@ -28,7 +28,9 @@ glossary: 6-8 objects {{word, part_of_speech, definition, example, collocation}}
 def generate(level: str, genre: str = "article", topic: str = "", language: str = "en") -> dict:
     prompt = INSTRUCTIONS.format(level=level, words=WORDS.get(level, "250-350"), genre=GENRES.get(genre, genre),
                                  lang=language_rule(language))
-    data = ask_json(prompt, f"CEFR {level}. Topic: {topic or 'any interesting everyday or academic topic'}")
+    from app.agents.ielts_rubrics import TOPIC_GUARD, topic_text
+    data = ask_json(prompt + "\n" + TOPIC_GUARD,
+                    f"CEFR {level}. Topic: {topic_text(topic) or 'any interesting everyday or academic topic'}")
     qs = [q for q in data.get("questions") or [] if q.get("question")]
     if len(qs) < 5 or not data.get("passage"):
         raise ValueError("The reading set is incomplete.")

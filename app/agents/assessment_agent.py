@@ -19,8 +19,8 @@ Do not put the correct answer in the wording of the question.
 
 
 def generate(level: str = "B1", focus: str = "mixed", language: str = "en") -> dict:
-    from app.agents.ielts_rubrics import language_rule
+    from app.agents.ielts_rubrics import language_rule, topic_text
     return ask_json(
         INSTRUCTIONS + "\n" + language_rule(language) + " This applies to explanations only.",
-        f"Target CEFR: {level}\nFocus: {focus}",
+        f"Target CEFR: {level[:5]}\nFocus: {topic_text(focus, 120)}",
     )

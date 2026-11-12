@@ -29,7 +29,7 @@ from app.services import ielts_exam, ielts_speaking, ielts_pronunciation, ielts_
 from app.services.ielts_scoring import criteria_band as ielts_criteria_band
 import threading
 from app.agents import ielts_coach
-from app.agents.ielts_rubrics import language_rule
+from app.agents.ielts_rubrics import language_rule, GENERAL_GUARD, learner_block, topic_text
 from app.agents.ielts_agent import (
     generate_writing_prompt as ielts_generate_writing_prompt,
     assess_writing as ielts_assess_writing,
@@ -79,6 +79,7 @@ class ChatPayload(TextPayload):
 
 class WritingPayload(TextPayload):
     purpose: str = "general"
+    roadmap_item: str | None = Field(default=None, max_length=20)
 
 
 class VocabularyPayload(BaseModel):
@@ -95,6 +96,7 @@ class VocabularyPracticePayload(BaseModel):
 class VocabularyPracticeSubmission(BaseModel):
     test_id: str
     answers: dict[str, str]
+    roadmap_item: str | None = Field(default=None, max_length=20)
 
 
 class TestPayload(BaseModel):
@@ -103,10 +105,9 @@ class TestPayload(BaseModel):
 
 
 class TestSubmission(BaseModel):
-    title: str
-    level: str
-    questions: list[dict]
+    test_id: str
     answers: dict[str, int]
+    roadmap_item: str | None = Field(default=None, max_length=20)
 
 
 class SpeakingPayload(TextPayload):
@@ -124,6 +125,7 @@ def me(user=Depends(require_user)):
     storage_cleanup.maybe_run_in_background()  # deletes audio older than 30 days, at most every 12 hours
     context = get_student_context(user["id"])
     context["email"] = user.get("email")
+    context["user_id"] = user["id"]
     context["is_admin"] = _is_admin(user)
     try:  # level roadmap summary for the Dashboard (missing table = roadmap not set up yet)
         rmv = roadmap_store.view(user["id"])
@@ -248,7 +250,7 @@ def writing(payload: WritingPayload, user=Depends(require_user)):
         result = writing_analyze(payload.text, payload.purpose, _feedback_lang(user["id"]))
     except Exception as exc:
         logger.exception("Writing analysis failed")
-        raise HTTPException(status_code=502, detail=f"AI review failed: {exc}")
+        raise HTTPException(status_code=503, detail=f"{AI_DOWN} Your text is still on the page — try again in a few minutes.")
 
     score = _clean_score(result.get("score"))
     estimated_level = _clean_level(result.get("estimated_level"))
@@ -284,6 +286,7 @@ def writing(payload: WritingPayload, user=Depends(require_user)):
     except Exception:
         logger.exception("Could not record writing activity")
 
+    result["roadmap"] = _roadmap_evidence(user["id"], payload.roadmap_item, "writing", score, estimated_level)
     return result
 
 
@@ -508,6 +511,7 @@ def vocabulary_practice_submit(payload: VocabularyPracticeSubmission, user=Depen
         "correct": correct,
         "total": total,
         "details": details,
+        "roadmap": _roadmap_evidence(user["id"], payload.roadmap_item, "vocabulary", score, test.get("level")),
     }
 
 
@@ -523,6 +527,7 @@ class ListeningGeneratePayload(BaseModel):
 class ListeningSubmitPayload(BaseModel):
     test_id: str
     answers: dict[str, str]
+    roadmap_item: str | None = Field(default=None, max_length=20)
 
 
 def _load_listening_test(test_id: str, user_id: str) -> dict | None:
@@ -572,7 +577,7 @@ def _listening_from_bank(payload: ListeningGeneratePayload, user: dict, reason: 
         audio = listening_bank.download(row["audio_path"])
     except Exception as exc:
         logger.exception("Could not download backup audio")
-        raise HTTPException(status_code=503, detail=f"{reason} The backup audio could not be loaded: {exc}")
+        raise HTTPException(status_code=503, detail=f"{reason} The backup audio could not be loaded. Please try again later.")
 
     test = dict(row["content"])
     test.update(level=row["level"], format=row.get("format") or test.get("format"),
@@ -640,8 +645,9 @@ def listening_audio_play(test_id: str, user=Depends(require_user)):
         raise HTTPException(status_code=403, detail=str(exc))
     except TimeoutError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except RuntimeError:
+        logger.exception("Audio could not be created")
+        raise HTTPException(status_code=502, detail="Could not create the audio. Please try again.")
 
     headers = {"Cache-Control": "no-store"}
     if plays_left is not None:
@@ -710,6 +716,7 @@ def listening_submit(payload: ListeningSubmitPayload, user=Depends(require_user)
     listening_audio.mark_checked(payload.test_id)
 
     return {
+        "roadmap": _roadmap_evidence(user["id"], payload.roadmap_item, "listening", score, level),
         "score": score,
         "correct": correct,
         "total": total,
@@ -726,8 +733,17 @@ def _admin_emails() -> set[str]:
     return {e.strip().strip('"').strip("'").strip().lower() for e in raw.split(",") if e.strip()}
 
 
+def _admin_ids() -> set[str]:
+    raw = get_settings().admin_user_ids.replace(";", ",")
+    return {x.strip().strip('"').strip("'") for x in raw.split(",") if x.strip()}
+
+
 def _is_admin(user: dict) -> bool:
-    return (user.get("email") or "").strip().lower() in _admin_emails()
+    """Admin by Supabase user ID (ADMIN_USER_IDS). An email in ADMIN_EMAILS counts only when the address is
+    confirmed, so nobody can claim admin rights by registering an admin's address first."""
+    if str(user.get("id")) in _admin_ids():
+        return True
+    return bool(user.get("email_confirmed")) and (user.get("email") or "").strip().lower() in _admin_emails()
 
 
 def _require_admin(user: dict) -> None:
@@ -758,16 +774,54 @@ def listening_bank_fill(user=Depends(require_user)):
 
 @router.post("/test/generate")
 def test_generate(payload: TestPayload, user=Depends(require_user)):
-    return generate_test(payload.level, payload.focus, _feedback_lang(user["id"]))
+    """The answer key stays on the server; the browser gets questions and options only."""
+    level = _clean_level(payload.level) or "B1"
+    test = generate_test(level, payload.focus[:120], _feedback_lang(user["id"]))
+    questions = [q for q in test.get("questions") or [] if isinstance(q, dict) and len(q.get("options") or []) >= 2]
+    row = admin_db().table("tests").insert({
+        "user_id": user["id"], "title": test.get("title") or "Mini test", "test_type": "adaptive_diagnostic",
+        "focus": "mixed", "level": level,
+        "questions": {"questions": questions, "title": test.get("title"), "level": level, "focus": payload.focus[:120]},
+    }).execute()
+    return {"test_id": row.data[0]["id"], "title": test.get("title"), "level": level,
+            "questions": [{k: q.get(k) for k in ("id", "skill", "question", "options")} for q in questions]}
+
+
+def _roadmap_evidence(user_id: str, item_id: str | None, module: str, score, level: str | None) -> dict | None:
+    """Confirm a roadmap skill from a result computed HERE (never from a score sent by the browser).
+    Objective practice must be done at the item's own CEFR level."""
+    if not item_id:
+        return None
+    from app.data import roadmap as rm
+    item = rm.ITEMS_BY_ID.get(item_id)
+    if not item or item["action"]["module"] != module:
+        return None
+    if module not in ("writing", "speaking") and (str(level or "")[:2] != item["sub"][:2]):
+        return None
+    try:
+        return roadmap_store.record_evidence(user_id, item_id, module, score, level)
+    except Exception:
+        logger.exception("Roadmap evidence could not be saved")
+        return None
 
 
 @router.post("/test/submit")
 def test_submit(payload: TestSubmission, user=Depends(require_user)):
+    rows = admin_db().table("tests").select("questions,level,title,test_type").eq("id", payload.test_id) \
+        .eq("user_id", user["id"]).limit(1).execute().data
+    if not rows or rows[0].get("test_type") != "adaptive_diagnostic" or not isinstance(rows[0].get("questions"), dict):
+        raise HTTPException(status_code=404, detail="Test not found. Generate a new test.")
+    stored = rows[0]["questions"]
+    if stored.get("submitted"):
+        raise HTTPException(status_code=409, detail="This test has already been checked. Generate a new one.")
+    questions = stored.get("questions") or []
+    level = stored.get("level") or rows[0].get("level")
+    title = stored.get("title") or rows[0].get("title") or "Mini test"
     correct = 0
     details = []
     by_skill: dict[str, dict[str, int]] = {}
 
-    for q in payload.questions:
+    for q in questions:
         qid = str(q.get("id"))
         chosen = payload.answers.get(qid)
         expected = q.get("answer_index")
@@ -791,26 +845,18 @@ def test_submit(payload: TestSubmission, user=Depends(require_user)):
             }
         )
 
-    total = len(payload.questions)
+    total = len(questions)
     score = round(correct / max(total, 1) * 100)
 
-    # Save the diagnostic as its own assessment, not as "Grammar".
     db = admin_db()
-    test_row = db.table("tests").insert({
-        "user_id": user["id"],
-        "title": payload.title,
-        "test_type": "adaptive_diagnostic",
-        "focus": "mixed",
-        "level": payload.level,
-        "questions": payload.questions,
-    }).execute()
-    test_id = test_row.data[0]["id"]
+    test_id = payload.test_id
+    db.table("tests").update({"questions": {**stored, "submitted": True}}).eq("id", test_id).execute()
 
     attempt_row = db.table("test_attempts").insert({
         "user_id": user["id"],
         "test_id": test_id,
-        "title": payload.title,
-        "level": payload.level,
+        "title": title,
+        "level": level,
         "focus": "mixed",
         "score": score,
         "correct_count": correct,
@@ -821,7 +867,7 @@ def test_submit(payload: TestSubmission, user=Depends(require_user)):
     attempt_id = attempt_row.data[0]["id"]
 
     answer_rows = []
-    for q, detail in zip(payload.questions, details):
+    for q, detail in zip(questions, details):
         chosen_idx = detail.get("chosen")
         expected_idx = detail.get("answer_index")
         options = q.get("options") or []
@@ -842,14 +888,14 @@ def test_submit(payload: TestSubmission, user=Depends(require_user)):
     record_activity(
         user["id"],
         "diagnostic",
-        f"Mini-test: {payload.title}",
+        f"Mini-test: {title}",
         score,
         {
-            "tested_level": payload.level,
+            "tested_level": level,
             "attempt_id": attempt_id,
             "by_skill": by_skill,
         },
-        tested_level=payload.level,
+        tested_level=level,
         evidence_source="adaptive_mixed_diagnostic",
         update_skill=False,
     )
@@ -869,14 +915,14 @@ def test_submit(payload: TestSubmission, user=Depends(require_user)):
         record_activity(
             user["id"],
             skill,
-            f"Mini-test {payload.level}: {payload.title}",
+            f"Mini-test {level}: {title}",
             skill_score,
             {
-                "tested_level": payload.level,
+                "tested_level": level,
                 "source": "mini_test",
                 "question_count": stats["total"],
             },
-            tested_level=payload.level,
+            tested_level=level,
             evidence_source="explicit_cefr_mini_test",
         )
 
@@ -886,7 +932,8 @@ def test_submit(payload: TestSubmission, user=Depends(require_user)):
         "total": total,
         "details": details,
         "skill_results": skill_results,
-        "tested_level": payload.level,
+        "tested_level": level,
+        "roadmap": _roadmap_evidence(user["id"], payload.roadmap_item, "test", score, level),
         "mastery_status": (
             "developing" if score < 70 else
             "proficient" if score < 85 else
@@ -901,16 +948,20 @@ def speaking(payload: SpeakingPayload, user=Depends(require_user)):
 
 @router.post("/speaking/full")
 async def speaking_full(text: str = Form(...), scenario: str = Form(default="general conversation"),
-                        audio: UploadFile | None = File(default=None), user=Depends(require_user)):
+                        audio: UploadFile | None = File(default=None), roadmap_item: str | None = Form(default=None),
+                        user=Depends(require_user)):
     """Transcript feedback + pronunciation assessed from the recording (when there is one)."""
     data = await audio.read() if audio is not None else None
     if data and len(data) > 12 * 1024 * 1024:
         data = None
     from starlette.concurrency import run_in_threadpool
-    return await run_in_threadpool(_speaking_feedback, user, text[:6000], scenario[:100], data)
+    if data:
+        _require_voice_consent(user)
+    return await run_in_threadpool(_speaking_feedback, user, text[:6000], scenario[:100], data,
+                                   (roadmap_item or "")[:20] or None)
 
 
-def _speaking_feedback(user: dict, text: str, scenario: str, audio: bytes | None) -> dict:
+def _speaking_feedback(user: dict, text: str, scenario: str, audio: bytes | None, roadmap_item: str | None = None) -> dict:
     lang = _feedback_lang(user["id"])
     instructions = """
 You are an English speaking-practice coach evaluating a TRANSCRIPT only.
@@ -930,10 +981,10 @@ practice_score must be the rounded average of fluency_coherence, lexical_resourc
 and grammar_accuracy. Do not score pronunciation or claim to have heard acoustic features.
 estimated_level must be based on complexity/control visible in the transcript, not directly
 mapped from practice_score.
-""" + language_rule(lang) + " This applies to positive_point, correction explanations, suggestion and disclaimer."
+""" + GENERAL_GUARD + "\n" + language_rule(lang) + " This applies to positive_point, correction explanations, suggestion and disclaimer."
     result = ask_json(
         instructions,
-        f"Scenario: {scenario}\nTranscript:\n{text}",
+        f"Scenario: {topic_text(scenario)}\nTranscript:\n{learner_block(text)}",
     )
 
     component_scores = [
@@ -981,6 +1032,7 @@ mapped from practice_score.
         tested_level=estimated_level,
         evidence_source="transcript_only_speaking_sample",
     )
+    result["roadmap"] = _roadmap_evidence(user["id"], roadmap_item, "speaking", practice_score, estimated_level)
     return result
 
 @router.post("/audio/transcribe")
@@ -989,6 +1041,7 @@ async def audio_transcribe(
     scenario: str = Form(default="general conversation"),
     user=Depends(require_user),
 ):
+    _require_voice_consent(user)
     allowed = {
         "audio/webm", "audio/ogg", "audio/mpeg", "audio/mp4",
         "audio/wav", "audio/x-wav", "audio/aac", "application/octet-stream"
@@ -1297,7 +1350,8 @@ def _speaking_take_answer(session: dict, prefix: str, turn_id: str, audio: Uploa
         except Exception as exc:
             logger.exception("Transcription failed")
             if not path:  # neither transcribed nor stored: the answer would be lost
-                raise HTTPException(status_code=502, detail=f"Could not save your answer: {exc}")
+                logger.exception("Could not save a speaking answer")
+                raise HTTPException(status_code=502, detail="Could not save your answer. Please record it again.")
             pending = True  # the stored recording is transcribed later
     ielts_speaking.record_answer(session, turn_id, transcript, path, seconds, pending)
 
@@ -1396,6 +1450,7 @@ def ielts_speaking_session_start(payload: IELTSSpeakingSessionPayload, user=Depe
 @router.post("/ielts/speaking/session/{session_id}/answer")
 def ielts_speaking_session_answer(session_id: str, turn_id: str = Form(...), seconds: float | None = Form(None),
                                   audio: UploadFile = File(...), user=Depends(require_user)):
+    _require_voice_consent(user)
     content = _practice_session_load(session_id, user["id"])
     session = content["session"]
     _speaking_take_answer(session, f"practice/{session_id}", turn_id, audio, seconds)
@@ -1509,8 +1564,9 @@ def ielts_practice_audio(test_id: str, user=Depends(require_user)):
         raise HTTPException(status_code=403, detail=str(exc))
     except TimeoutError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except RuntimeError:
+        logger.exception("Audio could not be created")
+        raise HTTPException(status_code=502, detail="Could not create the audio. Please try again.")
     headers = {"Cache-Control": "no-store"}
     if plays_left is not None:
         headers["X-Plays-Left"] = str(plays_left)
@@ -1978,6 +2034,7 @@ def ielts_mock_speaking_turn(mock_id: str, user=Depends(require_user)):
 @router.post("/ielts/mock/{mock_id}/speaking/answer")
 def ielts_mock_speaking_answer(mock_id: str, turn_id: str = Form(...), seconds: float | None = Form(None),
                                audio: UploadFile = File(...), user=Depends(require_user)):
+    _require_voice_consent(user)
     mock = _mock_speaking_ready(user, mock_id)
     session = _mock_speaking_session(user, mock)
     _speaking_take_answer(session, f"mock/{mock_id}", turn_id, audio, seconds)
@@ -2296,17 +2353,10 @@ def roadmap_view(user=Depends(require_user)):
         data = roadmap_store.view(user["id"], float(band) if band is not None else None)
     except Exception as exc:
         logger.exception("Roadmap failed")
-        raise HTTPException(status_code=503, detail=ROADMAP_SETUP if "learner_roadmap" in str(exc) else str(exc))
+        raise HTTPException(status_code=503, detail=ROADMAP_SETUP if "learner_roadmap" in str(exc)
+                            else "The roadmap is temporarily unavailable. Please try again.")
     data["language"] = _feedback_lang(user["id"])
     return data
-
-
-@router.post("/roadmap/evidence")
-def roadmap_evidence(payload: RoadmapEvidencePayload, user=Depends(require_user)):
-    try:
-        return roadmap_store.record_evidence(user["id"], payload.item_id, payload.module, payload.score, payload.level)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Unknown roadmap item.")
 
 
 @router.post("/placement/start")
@@ -2347,6 +2397,7 @@ def placement_writing(payload: PlacementWritingPayload, user=Depends(require_use
 
 @router.post("/placement/speaking/answer/{index}")
 async def placement_speaking_answer(index: int, audio: UploadFile = File(...), user=Depends(require_user)):
+    _require_voice_consent(user)
     data = await audio.read()
     if not data or len(data) > 8 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="The recording is empty or too long.")
@@ -2442,7 +2493,8 @@ def _progress_call(fn, *args):
     except Exception as exc:
         logger.exception("Progress call failed")
         raise HTTPException(status_code=503, detail=ROADMAP_SETUP if ("goals" in str(exc) or "checks" in str(exc)
-                                                                      or "learner_roadmap" in str(exc)) else str(exc))
+                                                                      or "learner_roadmap" in str(exc))
+                            else "Temporarily unavailable. Please try again.")
 
 
 @router.get("/progress/overview")
@@ -2487,6 +2539,7 @@ class ReadingGeneratePayload(BaseModel):
 class ReadingSubmitPayload(BaseModel):
     test_id: str
     answers: dict[str, str] = Field(default_factory=dict)
+    roadmap_item: str | None = Field(default=None, max_length=20)
 
 
 def _load_reading(test_id: str, user_id: str) -> dict | None:
@@ -2546,6 +2599,7 @@ def reading_submit(payload: ReadingSubmitPayload, user=Depends(require_user)):
                     {"level": level, "correct": correct, "total": total, "test_id": payload.test_id},
                     tested_level=level, evidence_source="explicit_cefr_reading_practice")
     return {"score": score, "correct": correct, "total": total, "level": level, "details": details,
+            "roadmap": _roadmap_evidence(user["id"], payload.roadmap_item, "reading", score, level),
             "glossary": content.get("glossary") or []}
 
 
@@ -2585,7 +2639,8 @@ def feedback_send(payload: FeedbackPayload, user=Depends(require_user)):
             "comment": payload.comment.strip(), "context": context}).execute()
     except Exception as exc:
         logger.exception("Feedback could not be saved")
-        raise HTTPException(status_code=503, detail=FEEDBACK_SETUP if "feedback" in str(exc) else str(exc))
+        raise HTTPException(status_code=503, detail=FEEDBACK_SETUP if "feedback" in str(exc)
+                            else "Feedback could not be saved. Please try again.")
     return {"id": row.data[0]["id"], "saved": True}
 
 
@@ -2639,11 +2694,118 @@ def admin_feedback_csv(user=Depends(require_user)):
     buf = io.StringIO()
     w = csv.writer(buf, delimiter=";")
     w.writerow(["Дата", "Email", "Роль", "Раздел", "Тип", "Оценка", "Замечание", "Язык", "Уровень", "Статус", "Заметка"])
+    def cell(v):
+        # cells starting with = + - @ would run as formulas in Excel (CSV injection)
+        v = "" if v is None else str(v)
+        return "'" + v if v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
+
     for r in rows:
         ctx = r.get("context") or {}
-        w.writerow([str(r.get("created_at") or "")[:16].replace("T", " "), r.get("email"), r.get("role"), r.get("section"),
+        w.writerow([cell(x) for x in [str(r.get("created_at") or "")[:16].replace("T", " "), r.get("email"), r.get("role"), r.get("section"),
                     r.get("kind"), r.get("rating") or "", r.get("comment"), ctx.get("lang", ""), ctx.get("level", ""),
-                    r.get("status"), r.get("admin_note") or ""])
+                    r.get("status"), r.get("admin_note") or ""]])
     data = "﻿" + buf.getvalue()
     return StreamingResponse(BytesIO(data.encode("utf-8")), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": "attachment; filename=feedback.csv"})
+
+
+# ========================= CONSENT (terms, personal data, voice recordings) =========================
+
+TERMS_VERSION = "2026-11"
+_consent_cache: dict[str, tuple[float, dict]] = {}
+CONSENT_SETUP = "Consents are not set up in Supabase yet: run database/security.sql in the Supabase SQL Editor."
+
+
+class ConsentPayload(BaseModel):
+    terms: bool
+    voice: bool = False
+
+
+def _consent(user_id: str) -> dict:
+    import time as _t
+    hit = _consent_cache.get(user_id)
+    if hit and _t.monotonic() - hit[0] < 300:
+        return hit[1]
+    try:
+        rows = admin_db().table("user_consents").select("*").eq("user_id", user_id).limit(1).execute().data or []
+    except Exception:
+        logger.exception("Consent lookup failed")
+        rows = []
+    data = rows[0] if rows else {}
+    _consent_cache[user_id] = (_t.monotonic(), data)
+    return data
+
+
+def _require_voice_consent(user: dict) -> None:
+    """Voice recordings are personal data: they are processed only with the learner's separate consent."""
+    if not _consent(user["id"]).get("voice"):
+        raise HTTPException(status_code=403, detail="VOICE_CONSENT_REQUIRED: Recording needs your consent to the "
+                                                    "processing of voice recordings. You can give it in the consent window.")
+
+
+@router.get("/consent")
+def consent_get(user=Depends(require_user)):
+    c = _consent(user["id"])
+    return {"version": TERMS_VERSION, "terms": c.get("terms_version") == TERMS_VERSION, "voice": bool(c.get("voice")),
+            "accepted_at": c.get("accepted_at")}
+
+
+@router.post("/consent")
+def consent_set(payload: ConsentPayload, user=Depends(require_user)):
+    if not payload.terms:
+        raise HTTPException(status_code=400, detail="The terms must be accepted to use the site.")
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc).isoformat()
+    row = {"user_id": user["id"], "terms_version": TERMS_VERSION, "accepted_at": now, "voice": payload.voice,
+           "voice_at": now if payload.voice else None}
+    try:
+        admin_db().table("user_consents").upsert(row, on_conflict="user_id").execute()
+    except Exception:
+        logger.exception("Consent could not be saved")
+        raise HTTPException(status_code=503, detail=CONSENT_SETUP)
+    _consent_cache.pop(user["id"], None)
+    return consent_get(user)
+
+
+# ========================= ADMIN: AI journal =========================
+
+@router.get("/admin/ai-usage")
+def admin_ai_usage(user=Depends(require_user)):
+    _require_admin(user)
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from app.services import ai_gateway
+    since = (_dt.now(_tz.utc) - _td(days=30)).isoformat()
+    try:
+        rows = admin_db().table("ai_usage").select("user_id,kind,model,cost_usd,ok,created_at,input_tokens,output_tokens") \
+            .gte("created_at", since).execute().data or []
+    except Exception:
+        return {"error": "The AI journal is not set up yet: run database/security.sql.", "today": ai_gateway.today_summary()}
+    today = _dt.now(_tz.utc).date().isoformat()
+    by_day: dict[str, dict] = {}
+    by_user: dict[str, dict] = {}
+    for r in rows:
+        d = str(r.get("created_at") or "")[:10]
+        day = by_day.setdefault(d, {"calls": 0, "cost": 0.0, "errors": 0})
+        day["calls"] += 1
+        day["cost"] += float(r.get("cost_usd") or 0)
+        day["errors"] += int(not r.get("ok"))
+        if d == today:
+            u = by_user.setdefault(str(r.get("user_id") or "system"), {"calls": 0, "cost": 0.0})
+            u["calls"] += 1
+            u["cost"] += float(r.get("cost_usd") or 0)
+    emails = {}
+    try:
+        ids = [k for k in by_user if k != "system"][:50]
+        if ids:
+            for p in admin_db().table("profiles").select("id,email").in_("id", ids).execute().data or []:
+                emails[str(p["id"])] = p.get("email")
+    except Exception:
+        pass
+    top = sorted(({"user": emails.get(k, k), **v} for k, v in by_user.items()), key=lambda x: -x["calls"])[:10]
+    days = [{"date": k, **{kk: (round(vv, 3) if isinstance(vv, float) else vv) for kk, vv in v.items()}}
+            for k, v in sorted(by_day.items(), reverse=True)]
+    for t in top:
+        t["cost"] = round(t["cost"], 3)
+    return {"today": ai_gateway.today_summary(), "days": days[:30], "top_users_today": top,
+            "limits": {k: getattr(get_settings(), k) for k in ("ai_user_calls_per_10min", "ai_user_calls_per_day",
+                                                                 "ai_user_tts_chars_per_day", "ai_daily_calls_limit")}}
