@@ -132,7 +132,15 @@ Because you only have a transcript, DO NOT score pronunciation. Criteria are who
     return data
 
 
-def generate_reading_practice(test_type: str) -> dict:
+FOCUS_LABELS = {
+    "multiple_choice": "multiple choice", "true_false_not_given": "TRUE / FALSE / NOT GIVEN",
+    "yes_no_not_given": "YES / NO / NOT GIVEN", "matching": "matching information",
+    "completion": "sentence / note completion", "short_answer": "short-answer (NO MORE THAN THREE WORDS)",
+}
+GROUP_TYPES = ("matching_headings", "summary_completion", "diagram_labelling")
+
+
+def generate_reading_practice(test_type: str, focus: str | None = None) -> dict:
     instructions = """
 Create an original IELTS-style Reading practice set for study, not an official or copied test.
 Return JSON with exactly: title, passage, questions, answer_key, explanations, groups.
@@ -145,6 +153,13 @@ answer_key: object mapping string question ids to exact answers. explanations: o
     special = random.choice(["matching_headings", "summary_completion", "diagram_labelling"] if kind == "Academic"
                             else ["matching_headings", "summary_completion"])
     request = f"IELTS {kind}. Include one \"{special}\" group of 4-6 questions; the rest standard. {EXAM_LEVEL}"
+    if focus in GROUP_TYPES:  # targeted drill of a weak question type
+        special = focus
+        request = (f"IELTS {kind}. Targeted drill: include one \"{focus}\" group of 7 questions; "
+                   f"the remaining 3 standard. {EXAM_LEVEL}")
+    elif focus in FOCUS_LABELS:
+        request = (f"IELTS {kind}. Targeted drill: at least 7 of the 10 questions must be of type \"{focus}\" "
+                   f"({FOCUS_LABELS[focus]}); also include one \"{special}\" group of 3 questions. {EXAM_LEVEL}")
     data = None
     for attempt in range(2):
         data = ask_json(instructions, request)
@@ -156,7 +171,7 @@ answer_key: object mapping string question ids to exact answers. explanations: o
     return verify_key(data, "passage", "passage")
 
 
-def generate_listening_practice() -> dict:
+def generate_listening_practice(focus: str | None = None) -> dict:
     instructions = """
 Create an original IELTS-style Listening practice set. It will be converted to text-to-speech.
 Return JSON with exactly: title, audio_script, questions, answer_key, explanations.
@@ -165,4 +180,8 @@ questions: exactly 10 objects with id (1-10), type, question, options (array; us
 answer_key: object mapping string ids to exact answers. explanations: object mapping ids to concise explanations.
 Do not copy published IELTS material.
 """
-    return verify_key(ask_json(instructions, EXAM_LEVEL), "audio_script", "transcript")
+    request = EXAM_LEVEL
+    if focus in ("multiple_choice", "completion", "short_answer"):
+        request += (f"\nTargeted drill: at least 7 of the 10 questions must be of type \"{focus}\" "
+                    f"({FOCUS_LABELS[focus]}).")
+    return verify_key(ask_json(instructions, request), "audio_script", "transcript")

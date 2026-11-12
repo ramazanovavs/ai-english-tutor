@@ -359,6 +359,7 @@ def mark_part(content: dict, answers: dict) -> tuple[int, list[dict]]:
         correct += int(ok)
         details.append({
             "id": qid,
+            "type": q.get("type"),
             "question": q.get("question"),
             "answer": given,
             "accepted": accepted if isinstance(accepted, list) else [accepted],

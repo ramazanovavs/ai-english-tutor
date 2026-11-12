@@ -20,7 +20,7 @@ from app.agents.grammar_agent import analyze as grammar_analyze
 from app.agents.writing_agent import analyze as writing_analyze
 from app.agents.vocabulary_agent import create_set, create_practice
 from app.agents import listening_agent
-from app.services import listening_audio, listening_bank
+from app.services import listening_audio, listening_bank, ielts_analytics
 from app.config import get_settings
 from app.agents.assessment_agent import generate as generate_test
 from app.services.openai_service import ask_text, ask_json, transcribe_audio, synthesize_speech
@@ -1021,6 +1021,7 @@ class IELTSSpeakingAssessPayload(BaseModel):
 
 class IELTSPracticeGeneratePayload(BaseModel):
     test_type: str = "Academic"
+    focus_type: str | None = None   # targeted drill of a weak question type (from analytics)
 
 
 class IELTSObjectiveSubmitPayload(BaseModel):
@@ -1030,6 +1031,12 @@ class IELTSObjectiveSubmitPayload(BaseModel):
 
 def _normalize_answer(value) -> str:
     return " ".join(str(value or "").strip().lower().split())
+
+
+@router.get("/ielts/analytics")
+def ielts_analytics_route(user=Depends(require_user)):
+    """Accuracy by question type, band history and a forecast with a range."""
+    return ielts_analytics.analytics(user["id"])
 
 
 @router.get("/ielts/dashboard")
@@ -1347,8 +1354,10 @@ def ielts_reading_generate(payload: IELTSPracticeGeneratePayload, user=Depends(r
     key = f"reading:{test_type}"
     notice = ""
     try:
-        content = ielts_generate_reading(test_type)
-        _bank_save_quietly("practice", key, content.get("title") or key, content)
+        focus = ielts_analytics.family(payload.focus_type)
+        content = ielts_generate_reading(test_type, focus)
+        if not focus:  # targeted drills are not mixed into the shared bank
+            _bank_save_quietly("practice", key, content.get("title") or key, content)
     except Exception:
         logger.exception("Reading generation failed; using the IELTS bank")
         item = _bank_backup(key, user, AI_DOWN)
@@ -1364,15 +1373,16 @@ def ielts_listening_generate(payload: IELTSPracticeGeneratePayload, user=Depends
     ensure_ielts_profile(user["id"])
     notice = ""
     try:
-        content = ielts_generate_listening()
+        focus = ielts_analytics.family(payload.focus_type)
+        content = ielts_generate_listening(focus)
         test_id = _ielts_practice_store(user, "listening", "Academic", content)
         script = content.get("audio_script") or ""
         listening_audio.start(
             test_id, user["id"], builder=lambda: synthesize_speech(script, instructions=IELTS_LISTENING_VOICE),
             max_plays=1,
-            # a successfully voiced set may refill the bank (10 sets kept)
-            on_ready=lambda audio: _bank_save_quietly("practice", "listening", content.get("title") or "listening",
-                                                      content, {"1": audio}),
+            # a successfully voiced set may refill the bank (10 sets kept); targeted drills are not
+            on_ready=None if focus else (lambda audio: _bank_save_quietly(
+                "practice", "listening", content.get("title") or "listening", content, {"1": audio})),
         )
     except Exception:
         logger.exception("Listening generation failed; using the IELTS bank")
@@ -1434,7 +1444,7 @@ def ielts_objective_submit(payload: IELTSObjectiveSubmitPayload, user=Depends(re
         ok = _mock_match_answer(given, accepted)
         correct += int(ok)
         details.append({
-            "id": qid, "correct": ok, "answer": given,
+            "id": qid, "type": q.get("type"), "correct": ok, "answer": given,
             "expected": accepted if isinstance(accepted, str) else " / ".join(map(str, accepted)),
             "explanation": explanations.get(qid, ""),
         })
@@ -2009,11 +2019,16 @@ def ielts_mock_finish(mock_id: str, user=Depends(require_user)):
             "listening_band": float(bands[0]), "reading_band": float(bands[1]),
             "writing_band": float(bands[2]), "speaking_band": float(bands[3]),
         }).eq("user_id", user["id"]).execute()
-        db.table("ielts_band_history").insert({
+        # one row per skill feeds the progress chart and the forecast
+        db.table("ielts_band_history").insert([
+            {"user_id": user["id"], "section": s, "band": float(b), "source": "full_mock_ai_practice",
+             "note": "Section band from the full mock."}
+            for s, b in zip(("listening", "reading", "writing", "speaking"), bands)
+        ] + [{
             "user_id": user["id"], "section": "overall", "band": overall,
             "source": "full_mock_ai_practice",
             "note": "Practice overall from the full mock (AI estimates).",
-        }).execute()
+        }]).execute()
 
     full = mock_get(user["id"], mock_id)
     review = _mock_review(user, mock_id)

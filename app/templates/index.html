@@ -221,6 +221,8 @@
             <div class="col-md-2 d-grid align-self-end"><button class="btn btn-primary" onclick="saveIELTSProfile()">Save</button></div>
           </div>
           <div id="ieltsBandCards" class="row g-3"></div>
+          <div class="card-soft mt-4"><h5>Progress and forecast</h5><div id="ieltsForecast" class="mb-2"></div><div id="ieltsProgressChart"></div></div>
+          <div class="card-soft mt-4"><h5>Accuracy by question type</h5><p class="small text-secondary">Listening and Reading answers from practice sets and full mocks. Practise weak types with a targeted drill.</p><div id="ieltsTypeStats"></div></div>
           <div class="card-soft mt-4"><h5>AI study recommendation</h5><p id="ieltsRecommendation" class="mb-0"></p></div>
           <div class="card-soft mt-4"><h5>Recent IELTS practice</h5><div id="ieltsRecent"></div></div>
           <div id="ieltsBankAdmin" class="mt-4"></div>
@@ -255,6 +257,7 @@
           <h2>IELTS Reading Practice</h2>
           <p class="text-secondary">One exam-level passage with 10 questions. Short sets give a percentage and a full review; a band is given only in the full 40-question test (IELTS Mock).</p>
           <div class="row g-2 mb-3"><div class="col-md-8"><select id="ieltsReadingType" class="form-select"><option>Academic</option><option>General Training</option></select></div><div class="col-md-4 d-grid"><button class="btn btn-primary" onclick="generateIELTSReading()">Generate reading set</button></div></div>
+          <div id="ieltsReadingFocus"></div>
           <div id="ieltsReadingContent"></div>
         </div>
 
@@ -262,6 +265,7 @@
           <h2>IELTS Listening Practice</h2>
           <p class="text-secondary">Exam conditions: read the questions first — the recording is played <strong>once</strong>. Short sets give a percentage and a review with the transcript; a band is given only in the full test (IELTS Mock).</p>
           <div class="row g-2 mb-3"><div class="col-md-6 d-grid"><button class="btn btn-primary" onclick="generateIELTSListening()">Generate listening set</button></div><div class="col-md-6 d-grid"><button id="ieltsListenAudioBtn" class="btn btn-outline-primary" onclick="playIELTSListening()" disabled>▶ Play recording (once)</button></div></div>
+          <div id="ieltsListeningFocus"></div>
           <div id="ieltsListeningContent"></div>
         </div>
 

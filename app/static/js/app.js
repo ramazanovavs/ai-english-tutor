@@ -806,6 +806,7 @@ async function loadIELTSDashboard() {
       bandCard("Reading", p.reading_band), bandCard("Writing", p.writing_band), bandCard("Speaking", p.speaking_band)
     ].join("");
     document.getElementById("ieltsRecommendation").textContent = d.recommendation || "Complete a practice activity to get a recommendation.";
+    loadIELTSAnalytics();
     const recent = [
       ...(d.objective_recent || []).map(x => ({name:`${x.section} · ${x.title}`, band:x.estimated_band, pct:x.score_percent, date:x.created_at})),
       ...(d.writing_recent || []).map(x => ({name:`Writing Task ${x.task_number}`, band:x.estimated_band, date:x.created_at})),
@@ -961,7 +962,7 @@ async function generateIELTSReading() {
   document.getElementById("ieltsReadingContent").innerHTML = `<div class="loader">Generating reading practice…</div>`;
   try {
     currentIELTSReading = await api("/api/ielts/reading/generate", {method:"POST", body:JSON.stringify({
-      test_type:document.getElementById("ieltsReadingType").value
+      test_type:document.getElementById("ieltsReadingType").value, focus_type: ieltsFocus.reading
     })});
     renderIELTSQuestions("ieltsReadingContent", currentIELTSReading, "reading");
     if (currentIELTSReading.notice) document.getElementById("ieltsReadingContent").insertAdjacentHTML("afterbegin", `<div class="alert alert-info">${esc(currentIELTSReading.notice)}</div>`);
@@ -971,7 +972,7 @@ async function generateIELTSReading() {
 async function generateIELTSListening() {
   document.getElementById("ieltsListeningContent").innerHTML = `<div class="loader">Generating listening practice…</div>`;
   try {
-    currentIELTSListening = await api("/api/ielts/listening/generate", {method:"POST", body:JSON.stringify({test_type:"Academic"})});
+    currentIELTSListening = await api("/api/ielts/listening/generate", {method:"POST", body:JSON.stringify({test_type:"Academic", focus_type: ieltsFocus.listening})});
     const btn = document.getElementById("ieltsListenAudioBtn");
     btn.disabled = false;
     btn.textContent = "▶ Play recording (once)";
@@ -2596,4 +2597,91 @@ function readingGroupsHTML(content, ctx, offset = 0) {
   }
   html += questions.filter(q => !used.has(String(q.id))).map(q => ctx.standard(q)).join("");
   return html;
+}
+
+// ========================= IELTS analytics: progress chart, forecast, weak question types =========================
+const ieltsFocus = {reading: null, listening: null};
+const IELTS_SKILL_COLORS = {listening:"#2563eb", reading:"#16a34a", writing:"#d97706", speaking:"#9333ea", overall:"#111827"};
+
+function ieltsProgressSVG(history) {
+  const skills = ["listening", "reading", "writing", "speaking", "overall"];
+  const rows = (history || []).filter(r => r.band != null);
+  if (rows.length < 2) return `<div class="text-secondary small">The chart appears after two or more results (a full mock adds all four skills at once).</div>`;
+  const times = rows.map(r => new Date(r.created_at).getTime());
+  const t0 = Math.min(...times), t1 = Math.max(...times), span = Math.max(t1 - t0, 1);
+  const W = 640, H = 240, L = 34, R = 12, T = 10, B = 26;
+  const x = t => L + (W - L - R) * (rows.length > 1 ? (t - t0) / span : 0.5);
+  const y = b => T + (H - T - B) * (1 - (Number(b) - 3) / 6);
+  let grid = "";
+  for (let b = 3; b <= 9; b++) grid += `<line x1="${L}" x2="${W-R}" y1="${y(b)}" y2="${y(b)}" stroke="#e5e7eb"/><text x="${L-6}" y="${y(b)+4}" font-size="11" text-anchor="end" fill="#6b7280">${b}</text>`;
+  let lines = "", legend = "";
+  skills.forEach((s, i) => {
+    const pts = rows.filter(r => r.section === s).map(r => [x(new Date(r.created_at).getTime()), y(Math.max(3, Number(r.band)))]);
+    if (!pts.length) return;
+    const c = IELTS_SKILL_COLORS[s];
+    lines += `<polyline fill="none" stroke="${c}" stroke-width="${s === "overall" ? 3 : 2}" ${s === "overall" ? 'stroke-dasharray="6 4"' : ""} points="${pts.map(p => p.join(",")).join(" ")}"/>`;
+    lines += pts.map(p => `<circle cx="${p[0]}" cy="${p[1]}" r="3" fill="${c}"/>`).join("");
+    legend += `<span class="me-3 small"><span style="display:inline-block;width:12px;height:3px;background:${c};vertical-align:middle"></span> ${s[0].toUpperCase() + s.slice(1)}</span>`;
+  });
+  const fmt = t => new Date(t).toLocaleDateString(undefined, {day:"numeric", month:"short"});
+  const axis = `<text x="${L}" y="${H-6}" font-size="11" fill="#6b7280">${fmt(t0)}</text><text x="${W-R}" y="${H-6}" font-size="11" text-anchor="end" fill="#6b7280">${fmt(t1)}</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" class="w-100" role="img" aria-label="IELTS band progress">${grid}${lines}${axis}</svg><div>${legend}</div>`;
+}
+
+function ieltsForecastHTML(f) {
+  if (!f || f.overall == null) {
+    const miss = (f?.missing || []).map(s => s[0].toUpperCase() + s.slice(1)).join(", ");
+    return `<div class="text-secondary">Forecast needs results in all four skills${miss ? ` (missing: ${esc(miss)})` : ""}. A full mock gives all four at once.</div>`;
+  }
+  const r = (v) => Number(v).toFixed(1);
+  return `<div class="d-flex align-items-baseline gap-3 flex-wrap">
+    <div><div class="small text-secondary">Likely exam result</div><div class="fs-3 fw-bold">${r(f.low)} – ${r(f.high)}</div></div>
+    <div class="small text-secondary">centre ${r(f.overall)} · based on ${esc(f.results_used)} recent results; the range narrows as your results become more stable.</div></div>`;
+}
+
+function ieltsTypeStatsHTML(rows) {
+  if (!rows?.length) return `<div class="text-secondary small">No Listening or Reading answers yet.</div>`;
+  return `<table class="table table-sm align-middle mb-0"><thead><tr><th>Section</th><th>Question type</th><th>Correct</th><th style="width:30%"></th><th></th></tr></thead><tbody>${
+    rows.map(r => {
+      const cls = r.percent < 60 ? "bg-danger" : r.percent < 80 ? "bg-warning" : "bg-success";
+      const btn = r.trainable ? `<button class="btn btn-sm btn-outline-primary" onclick="startIELTSDrill('${esc(r.section)}','${esc(r.type)}')">Practise</button>` : "";
+      return `<tr><td class="text-capitalize">${esc(r.section)}</td><td>${esc(r.label)}</td><td>${esc(r.correct)}/${esc(r.total)} · <strong>${esc(r.percent)}%</strong></td>
+        <td><div class="progress" style="height:8px"><div class="progress-bar ${cls}" style="width:${Number(r.percent)}%"></div></div></td><td class="text-end">${btn}</td></tr>`;
+    }).join("")}</tbody></table>`;
+}
+
+async function loadIELTSAnalytics() {
+  try {
+    const a = await api("/api/ielts/analytics");
+    document.getElementById("ieltsForecast").innerHTML = ieltsForecastHTML(a.forecast);
+    document.getElementById("ieltsProgressChart").innerHTML = ieltsProgressSVG(a.history);
+    document.getElementById("ieltsTypeStats").innerHTML = ieltsTypeStatsHTML(a.by_type);
+    if (a.weakest?.length) {
+      const w = a.weakest.map(x => `${x.label} (${x.section}, ${x.percent}%)`).join("; ");
+      document.getElementById("ieltsRecommendation").insertAdjacentHTML("beforeend", `<br><span class="small">Weakest question types: ${esc(w)}.</span>`);
+    }
+  } catch (e) {
+    document.getElementById("ieltsTypeStats").innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
+  }
+}
+
+function renderIELTSFocusBanner(section) {
+  const el = document.getElementById(section === "reading" ? "ieltsReadingFocus" : "ieltsListeningFocus");
+  if (!el) return;
+  const t = ieltsFocus[section];
+  el.innerHTML = t ? `<div class="alert alert-primary py-2 d-flex justify-content-between align-items-center">
+      <span>Targeted drill: <strong>${esc(t.replace(/_/g, " "))}</strong> — most questions in the next set are of this type.</span>
+      <button class="btn btn-sm btn-outline-secondary" onclick="clearIELTSDrill('${section}')">Normal mix</button></div>` : "";
+}
+
+function startIELTSDrill(section, type) {
+  ieltsFocus[section] = type;
+  openPage(section === "reading" ? "ielts-reading" : "ielts-listening");
+  renderIELTSFocusBanner(section);
+  section === "reading" ? generateIELTSReading() : generateIELTSListening();
+}
+
+function clearIELTSDrill(section) {
+  ieltsFocus[section] = null;
+  renderIELTSFocusBanner(section);
 }
