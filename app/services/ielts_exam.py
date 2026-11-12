@@ -81,8 +81,18 @@ def _audio_path(mock_id: str, part: int) -> str:
     return f"ielts-mock/{mock_id}/part{part}.mp3"
 
 
+MEMORY_AUDIO_LIMIT = 8  # ~2 mocks; the free Render instance has only 512 MB of RAM
+
+
+def _remember(path: str, audio: bytes) -> None:
+    _memory_audio.pop(path, None)
+    _memory_audio[path] = audio
+    while len(_memory_audio) > MEMORY_AUDIO_LIMIT:
+        _memory_audio.pop(next(iter(_memory_audio)))
+
+
 def store_audio(mock_id: str, part: int, audio: bytes) -> None:
-    _memory_audio[_audio_path(mock_id, part)] = audio
+    _remember(_audio_path(mock_id, part), audio)
     try:
         admin_db().storage.from_(BUCKET).upload(
             _audio_path(mock_id, part), audio, {"content-type": "audio/mpeg", "upsert": "true"})
@@ -96,7 +106,7 @@ def load_audio(mock_id: str, part: int) -> bytes | None:
         return _memory_audio[path]
     try:
         data = admin_db().storage.from_(BUCKET).download(path)
-        _memory_audio[path] = data
+        _remember(path, data)
         return data
     except Exception:
         logger.exception("Mock audio not found in storage")
