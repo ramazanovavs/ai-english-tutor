@@ -2547,3 +2547,103 @@ def reading_submit(payload: ReadingSubmitPayload, user=Depends(require_user)):
                     tested_level=level, evidence_source="explicit_cefr_reading_practice")
     return {"score": score, "correct": correct, "total": total, "level": level, "details": details,
             "glossary": content.get("glossary") or []}
+
+
+# ========================= FEEDBACK FROM TESTERS =========================
+
+FEEDBACK_SETUP = "Feedback is not set up in Supabase yet: run database/feedback.sql in the Supabase SQL Editor."
+
+
+class FeedbackPayload(BaseModel):
+    role: Literal["student", "masters", "teacher", "other"] = "student"
+    section: str = Field(min_length=1, max_length=60)
+    kind: Literal["bug", "inconvenience", "wish", "impression"] = "impression"
+    rating: int | None = Field(default=None, ge=1, le=5)
+    comment: str = Field(min_length=3, max_length=5000)
+    context: dict = Field(default_factory=dict)
+
+
+class FeedbackStatusPayload(BaseModel):
+    status: Literal["new", "seen", "done"]
+    admin_note: str | None = Field(default=None, max_length=2000)
+
+
+def _feedback_rows(user_id: str | None = None) -> list[dict]:
+    q = admin_db().table("feedback").select("*")
+    if user_id:
+        q = q.eq("user_id", user_id)
+    return q.order("created_at", desc=True).limit(1000).execute().data or []
+
+
+@router.post("/feedback")
+def feedback_send(payload: FeedbackPayload, user=Depends(require_user)):
+    context = {k: str(v)[:200] for k, v in list(payload.context.items())[:10]}
+    try:
+        row = admin_db().table("feedback").insert({
+            "user_id": user["id"], "email": user.get("email"), "role": payload.role,
+            "section": payload.section.strip(), "kind": payload.kind, "rating": payload.rating,
+            "comment": payload.comment.strip(), "context": context}).execute()
+    except Exception as exc:
+        logger.exception("Feedback could not be saved")
+        raise HTTPException(status_code=503, detail=FEEDBACK_SETUP if "feedback" in str(exc) else str(exc))
+    return {"id": row.data[0]["id"], "saved": True}
+
+
+@router.get("/feedback/mine")
+def feedback_mine(user=Depends(require_user)):
+    try:
+        rows = _feedback_rows(user["id"])
+    except Exception:
+        return {"items": []}
+    return {"items": [{k: r.get(k) for k in ("id", "section", "kind", "rating", "comment", "status", "created_at")}
+                      for r in rows]}
+
+
+@router.get("/admin/feedback")
+def admin_feedback(user=Depends(require_user)):
+    _require_admin(user)
+    try:
+        rows = _feedback_rows()
+    except Exception:
+        logger.exception("Feedback list failed")
+        return {"items": [], "error": FEEDBACK_SETUP}
+    by_section: dict[str, dict] = {}
+    for r in rows:
+        s = by_section.setdefault(r.get("section") or "—", {"count": 0, "ratings": []})
+        s["count"] += 1
+        if r.get("rating"):
+            s["ratings"].append(int(r["rating"]))
+    summary = [{"section": k, "count": v["count"],
+                "avg_rating": round(sum(v["ratings"]) / len(v["ratings"]), 1) if v["ratings"] else None}
+               for k, v in sorted(by_section.items(), key=lambda kv: -kv[1]["count"])]
+    return {"items": rows, "summary": summary}
+
+
+@router.post("/admin/feedback/{feedback_id}")
+def admin_feedback_status(feedback_id: str, payload: FeedbackStatusPayload, user=Depends(require_user)):
+    _require_admin(user)
+    fields = {"status": payload.status}
+    if payload.admin_note is not None:
+        fields["admin_note"] = payload.admin_note
+    admin_db().table("feedback").update(fields).eq("id", feedback_id).execute()
+    return {"ok": True}
+
+
+@router.get("/admin/feedback.csv")
+def admin_feedback_csv(user=Depends(require_user)):
+    """All feedback as a CSV file that opens in Excel (UTF-8 with BOM, ';' separator)."""
+    _require_admin(user)
+    import csv
+    import io
+    rows = _feedback_rows()
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=";")
+    w.writerow(["Дата", "Email", "Роль", "Раздел", "Тип", "Оценка", "Замечание", "Язык", "Уровень", "Статус", "Заметка"])
+    for r in rows:
+        ctx = r.get("context") or {}
+        w.writerow([str(r.get("created_at") or "")[:16].replace("T", " "), r.get("email"), r.get("role"), r.get("section"),
+                    r.get("kind"), r.get("rating") or "", r.get("comment"), ctx.get("lang", ""), ctx.get("level", ""),
+                    r.get("status"), r.get("admin_note") or ""])
+    data = "﻿" + buf.getvalue()
+    return StreamingResponse(BytesIO(data.encode("utf-8")), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": "attachment; filename=feedback.csv"})

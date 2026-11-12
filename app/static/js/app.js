@@ -241,6 +241,10 @@ function openPage(name) {
   if (name !== "listening" && typeof stopListeningAudio === "function") stopListeningAudio();
   if (name === "roadmap") loadRoadmap();
   if (name === "review") loadReview();
+  if (name === "feedback") loadFeedback();
+  else feedbackFromPage = name;
+  const fab = document.getElementById("feedbackFab");
+  if (fab) fab.classList.toggle("d-none", name === "feedback");
   if (typeof renderRoadmapTaskBanner === "function") renderRoadmapTaskBanner(name);
 }
 
@@ -2994,6 +2998,7 @@ async function setUiLang(lang) {
   renderToday();
   if (!document.getElementById("page-roadmap").classList.contains("d-none")) renderRoadmapPage();
   if (!document.getElementById("page-review").classList.contains("d-none")) renderReview();
+  if (!document.getElementById("page-feedback").classList.contains("d-none")) loadFeedback();
   const page = document.querySelector(".page:not(.d-none)")?.id?.replace("page-", "");
   if (page) renderRoadmapTaskBanner(page);
 }
@@ -3863,3 +3868,169 @@ async function addReadingWords() {
     }
   };
 })();
+
+// ========================= Feedback from testers =========================
+let feedbackFromPage = "dashboard", feedbackRating = 0, feedbackAdmin = null, feedbackFilter = {status: "", section: ""};
+Object.assign(RM_T, {
+  m_feedback: {ru: "💬 Обратная связь", kk: "💬 Кері байланыс", en: "💬 Feedback"},
+  fb_fab: {ru: "💬 Отзыв", kk: "💬 Пікір", en: "💬 Feedback"},
+  fb_title: {ru: "Обратная связь", kk: "Кері байланыс", en: "Feedback"},
+  fb_intro: {ru: "Спасибо, что тестируете сайт! Выберите раздел меню, с которым работали, и опишите замечание, впечатление или пожелание. Можно оставить сколько угодно отзывов — по одному на каждое замечание удобнее всего.", kk: "Сайтты сынағаныңызға рақмет! Жұмыс істеген мәзір бөлімін таңдап, ескертуіңізді, әсеріңізді немесе тілегіңізді жазыңыз. Пікірді қанша болса да қалдыруға болады — әр ескертуге бөлек жазған ыңғайлы.", en: "Thank you for testing the site! Choose the menu section you worked with and describe your remark, impression or wish. Leave as many as you like — one per remark works best."},
+  fb_role: {ru: "Кто вы", kk: "Сіз кімсіз", en: "You are"},
+  fb_role_student: {ru: "Студент", kk: "Студент", en: "Student"},
+  fb_role_masters: {ru: "Магистрант", kk: "Магистрант", en: "Master's student"},
+  fb_role_teacher: {ru: "Учитель английского языка", kk: "Ағылшын тілі мұғалімі", en: "English teacher"},
+  fb_role_other: {ru: "Другое", kk: "Басқа", en: "Other"},
+  fb_section: {ru: "Пункт меню, с которым вы работали", kk: "Жұмыс істеген мәзір бөлімі", en: "Menu section you worked with"},
+  fb_general: {ru: "Сайт в целом", kk: "Сайт жалпы", en: "The site in general"},
+  fb_placement: {ru: "Входной тест", kk: "Кіріс тесті", en: "Placement test"},
+  fb_kind: {ru: "Тип отзыва", kk: "Пікір түрі", en: "Type"},
+  fb_kind_bug: {ru: "Ошибка — что-то не работает", kk: "Қате — бірдеңе жұмыс істемейді", en: "Bug — something does not work"},
+  fb_kind_inconvenience: {ru: "Неудобство — непонятно или сложно", kk: "Ыңғайсыздық — түсініксіз немесе қиын", en: "Inconvenience — unclear or hard"},
+  fb_kind_wish: {ru: "Пожелание — что добавить или изменить", kk: "Тілек — нені қосу немесе өзгерту керек", en: "Wish — what to add or change"},
+  fb_kind_impression: {ru: "Впечатление — общее мнение", kk: "Әсер — жалпы пікір", en: "Impression — general opinion"},
+  fb_rating: {ru: "Оценка раздела", kk: "Бөлімнің бағасы", en: "Rating of the section"},
+  fb_rating_hint: {ru: "1 — плохо, 5 — отлично (необязательно)", kk: "1 — нашар, 5 — өте жақсы (міндетті емес)", en: "1 — poor, 5 — excellent (optional)"},
+  fb_comment: {ru: "Замечание или впечатление", kk: "Ескерту немесе әсер", en: "Remark or impression"},
+  fb_comment_ph: {ru: "Что вы делали, что произошло, что ожидали увидеть? Что понравилось, что улучшить?", kk: "Не істедіңіз, не болды, нені күттіңіз? Не ұнады, нені жақсарту керек?", en: "What did you do, what happened, what did you expect? What did you like, what should be improved?"},
+  fb_send: {ru: "Отправить отзыв", kk: "Пікірді жіберу", en: "Send feedback"},
+  fb_thanks: {ru: "Спасибо! Отзыв сохранён.", kk: "Рақмет! Пікір сақталды.", en: "Thank you! Your feedback is saved."},
+  fb_short: {ru: "Опишите замечание чуть подробнее.", kk: "Ескертуді сәл толығырақ жазыңыз.", en: "Please describe it in a bit more detail."},
+  fb_mine: {ru: "Мои отзывы", kk: "Менің пікірлерім", en: "My feedback"},
+  fb_none: {ru: "Вы ещё не оставляли отзывов.", kk: "Сіз әлі пікір қалдырған жоқсыз.", en: "You have not left any feedback yet."},
+  fb_st_new: {ru: "новый", kk: "жаңа", en: "new"},
+  fb_st_seen: {ru: "просмотрен", kk: "қаралды", en: "seen"},
+  fb_st_done: {ru: "учтён", kk: "ескерілді", en: "done"},
+  fb_admin: {ru: "Все отзывы (администратор)", kk: "Барлық пікірлер (әкімші)", en: "All feedback (admin)"},
+  fb_download: {ru: "Скачать для Excel (CSV)", kk: "Excel үшін жүктеу (CSV)", en: "Download for Excel (CSV)"},
+  fb_summary: {ru: "Сводка по разделам", kk: "Бөлімдер бойынша жиынтық", en: "Summary by section"},
+  fb_count: {ru: "Отзывов", kk: "Пікірлер", en: "Count"},
+  fb_avg: {ru: "Средняя оценка", kk: "Орташа баға", en: "Average rating"},
+  fb_all: {ru: "Все", kk: "Барлығы", en: "All"},
+});
+
+function openFeedback() { openPage("feedback"); }
+
+function feedbackSections() {
+  const out = [{value: "general", label: T("fb_general")}, {value: "placement", label: T("fb_placement")}];
+  document.querySelectorAll(".menu-btn").forEach(b => {
+    if (b.dataset.page && b.dataset.page !== "feedback") out.push({value: b.dataset.page, label: b.textContent.trim()});
+  });
+  return out;
+}
+
+function feedbackSectionLabelRu(value) {
+  // stored in Russian for the admin and the CSV, whatever language the tester uses
+  const keys = {general: "fb_general", placement: "fb_placement", roadmap: "menu", review: "menu_review"};
+  const btn = document.querySelector(`.menu-btn[data-page="${value}"]`);
+  const key = keys[value] || btn?.dataset.i18n;
+  const ru = key && RM_T[key]?.ru;
+  return (ru || btn?.textContent || value).replace(/^[^\p{L}]+/u, "").trim();
+}
+
+async function loadFeedback() {
+  renderFeedback([]);
+  try { const d = await api("/api/feedback/mine"); renderFeedback(d.items || []); } catch (e) {}
+  if (currentProfile?.is_admin) loadFeedbackAdmin();
+}
+
+function renderFeedback(mine) {
+  let role = "student";
+  try { role = localStorage.getItem("feedbackRole") || "student"; } catch (e) {}
+  const sections = feedbackSections();
+  const pre = sections.some(s => s.value === feedbackFromPage) ? feedbackFromPage : "general";
+  const st = s => T("fb_st_" + (s || "new"));
+  document.getElementById("feedbackRoot").innerHTML = `
+    <h2>${esc(T("fb_title"))}</h2>
+    <p class="text-secondary">${esc(T("fb_intro"))}</p>
+    <div class="card-soft">
+      <div class="row g-3">
+        <div class="col-md-6"><label class="form-label">${esc(T("fb_role"))}</label>
+          <select id="fbRole" class="form-select">${["student", "masters", "teacher", "other"].map(r => `<option value="${r}" ${r === role ? "selected" : ""}>${esc(T("fb_role_" + r))}</option>`).join("")}</select></div>
+        <div class="col-md-6"><label class="form-label">${esc(T("fb_section"))}</label>
+          <select id="fbSection" class="form-select">${sections.map(s => `<option value="${esc(s.value)}" ${s.value === pre ? "selected" : ""}>${esc(s.label)}</option>`).join("")}</select></div>
+        <div class="col-md-6"><label class="form-label">${esc(T("fb_kind"))}</label>
+          <select id="fbKind" class="form-select">${["bug", "inconvenience", "wish", "impression"].map(k => `<option value="${k}">${esc(T("fb_kind_" + k))}</option>`).join("")}</select></div>
+        <div class="col-md-6"><label class="form-label">${esc(T("fb_rating"))}</label>
+          <div class="fb-stars" id="fbStars">${[1, 2, 3, 4, 5].map(n => `<button type="button" onclick="setFeedbackRating(${n})" aria-label="${n}">★</button>`).join("")}</div>
+          <div class="small text-secondary">${esc(T("fb_rating_hint"))}</div></div>
+        <div class="col-12"><label class="form-label">${esc(T("fb_comment"))}</label>
+          <textarea id="fbComment" class="form-control" rows="6" maxlength="5000" placeholder="${esc(T("fb_comment_ph"))}"></textarea></div>
+        <div class="col-12"><button id="fbSend" class="btn btn-primary" onclick="sendFeedback()">${esc(T("fb_send"))}</button></div>
+      </div>
+    </div>
+    <div class="card-soft mt-4"><h5>${esc(T("fb_mine"))}</h5>
+      ${mine.length ? mine.map(m => `<div class="fb-item"><div class="small text-secondary">${esc(fmtDate(m.created_at))} · ${esc(m.section)} · ${esc(T("fb_kind_" + m.kind).split(" — ")[0])}${m.rating ? " · " + "★".repeat(m.rating) : ""} · <span class="badge text-bg-light">${esc(st(m.status))}</span></div>
+        <div style="white-space:pre-line">${esc(m.comment)}</div></div>`).join("") : `<div class="text-secondary">${esc(T("fb_none"))}</div>`}</div>
+    <div id="feedbackAdmin"></div>`;
+  feedbackRating = 0;
+  setFeedbackRating(0);
+  if (feedbackAdmin) renderFeedbackAdmin();
+}
+
+function setFeedbackRating(n) {
+  feedbackRating = feedbackRating === n ? 0 : n;   // a second click on the same star clears the rating
+  document.querySelectorAll("#fbStars button").forEach((b, i) => b.classList.toggle("on", i < feedbackRating));
+}
+
+async function sendFeedback() {
+  const comment = document.getElementById("fbComment").value.trim();
+  if (comment.length < 3) return rmToast(T("fb_short"));
+  const role = document.getElementById("fbRole").value;
+  try { localStorage.setItem("feedbackRole", role); } catch (e) {}
+  const btn = document.getElementById("fbSend");
+  btn.disabled = true;
+  try {
+    await api("/api/feedback", {method: "POST", body: JSON.stringify({
+      role, section: feedbackSectionLabelRu(document.getElementById("fbSection").value),
+      kind: document.getElementById("fbKind").value, rating: feedbackRating || null, comment,
+      context: {lang: uiLang(), level: currentProfile?.roadmap?.current || currentProfile?.profile?.cefr_level || "",
+                screen: `${window.innerWidth}x${window.innerHeight}`, agent: navigator.userAgent.slice(0, 150)}})});
+    rmToast(T("fb_thanks"));
+    loadFeedback();
+  } catch (e) { rmToast(e.message); btn.disabled = false; }
+}
+
+async function loadFeedbackAdmin() {
+  try { feedbackAdmin = await api("/api/admin/feedback"); renderFeedbackAdmin(); } catch (e) {}
+}
+
+function renderFeedbackAdmin() {
+  const box = document.getElementById("feedbackAdmin");
+  if (!box || !feedbackAdmin) return;
+  const d = feedbackAdmin;
+  if (d.error) { box.innerHTML = `<div class="alert alert-warning mt-4">${esc(d.error)}</div>`; return; }
+  const items = d.items.filter(x => (!feedbackFilter.status || x.status === feedbackFilter.status) && (!feedbackFilter.section || x.section === feedbackFilter.section));
+  const roleName = r => T("fb_role_" + (r || "other"));
+  box.innerHTML = `<div class="card-soft mt-4">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2"><h5 class="mb-0">${esc(T("fb_admin"))} · ${d.items.length}</h5>
+      <button class="btn btn-sm btn-outline-primary" onclick="downloadFeedbackCsv()">${esc(T("fb_download"))}</button></div>
+    <h6 class="mt-3">${esc(T("fb_summary"))}</h6>
+    <table class="table table-sm"><thead><tr><th></th><th>${esc(T("fb_count"))}</th><th>${esc(T("fb_avg"))}</th></tr></thead><tbody>
+      ${d.summary.map(s => `<tr><td><a href="#" onclick="feedbackFilter.section=${esc(JSON.stringify(s.section))};renderFeedbackAdmin();return false">${esc(s.section)}</a></td><td>${s.count}</td><td>${s.avg_rating ?? "—"}</td></tr>`).join("")}</tbody></table>
+    <div class="d-flex gap-2 flex-wrap mb-2">
+      ${["", "new", "seen", "done"].map(st => `<button class="btn btn-sm ${feedbackFilter.status === st ? "btn-primary" : "btn-outline-secondary"}" onclick="feedbackFilter.status='${st}';renderFeedbackAdmin()">${esc(st ? T("fb_st_" + st) : T("fb_all"))}</button>`).join("")}
+      ${feedbackFilter.section ? `<button class="btn btn-sm btn-warning" onclick="feedbackFilter.section='';renderFeedbackAdmin()">${esc(feedbackFilter.section)} ✕</button>` : ""}
+    </div>
+    ${items.map(x => `<div class="fb-item">
+      <div class="small text-secondary">${esc(fmtDate(x.created_at))} · ${esc(x.email || "")} · ${esc(roleName(x.role))} · <strong>${esc(x.section)}</strong> · ${esc(T("fb_kind_" + x.kind).split(" — ")[0])}${x.rating ? " · " + "★".repeat(x.rating) : ""}${x.context?.level ? " · " + esc(x.context.level) : ""}</div>
+      <div style="white-space:pre-line">${esc(x.comment)}</div>
+      <div class="d-flex gap-1 mt-1">${["new", "seen", "done"].map(st => `<button class="btn btn-sm ${x.status === st ? "btn-secondary" : "btn-outline-secondary"}" onclick="setFeedbackStatus('${x.id}','${st}')">${esc(T("fb_st_" + st))}</button>`).join("")}</div>
+    </div>`).join("")}</div>`;
+}
+
+async function setFeedbackStatus(id, status) {
+  try { await api(`/api/admin/feedback/${id}`, {method: "POST", body: JSON.stringify({status})}); await loadFeedbackAdmin(); }
+  catch (e) { rmToast(e.message); }
+}
+
+async function downloadFeedbackCsv() {
+  try {
+    const res = await fetch("/api/admin/feedback.csv", {headers: {"Authorization": `Bearer ${currentSession.access_token}`}});
+    if (!res.ok) throw new Error(`Error ${res.status}`);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(await res.blob());
+    a.download = `feedback_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+  } catch (e) { rmToast(e.message); }
+}

@@ -71,6 +71,8 @@
           <button class="menu-btn" data-page="ielts-reading">📖 IELTS Reading</button>
           <button class="menu-btn" data-page="ielts-listening">🎧 IELTS Listening</button>
           <button class="menu-btn" data-page="ielts-mock">🧪 IELTS Mock</button>
+          <div class="border-top mt-3 pt-2"></div>
+          <button class="menu-btn" data-page="feedback" data-i18n="m_feedback">💬 Обратная связь</button>
         </div>
       </aside>
 
@@ -91,6 +93,10 @@
             <h5 data-i18n="d_reco">AI recommendation</h5>
             <p id="recommendation" class="mb-0">Loading your learning profile…</p>
           </div>
+        </div>
+
+        <div id="page-feedback" class="page d-none">
+          <div id="feedbackRoot"></div>
         </div>
 
         <div id="page-review" class="page d-none">
@@ -382,6 +388,7 @@
       </section>
     </div>
   </main>
+  <button id="feedbackFab" class="btn btn-primary feedback-fab" onclick="openFeedback()" data-i18n="fb_fab">💬 Отзыв</button>
 </div>
 
 <script>
