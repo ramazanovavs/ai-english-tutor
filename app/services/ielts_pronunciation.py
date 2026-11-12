@@ -45,14 +45,18 @@ issues (array of up to 4 objects with feature, example, tip; "example" quotes a 
 def _decode_to_pcm(data: bytes) -> bytes:
     import av  # imported lazily so the app still starts if PyAV is missing
 
+    def pcm(f) -> bytes:
+        # s16 mono = 2 bytes per sample; the plane buffer may be padded, so cut it (no numpy needed)
+        return bytes(f.planes[0])[: f.samples * 2]
+
     out = bytearray()
     with av.open(io.BytesIO(data)) as container:
         resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
         for frame in container.decode(audio=0):
             for f in resampler.resample(frame):
-                out += f.to_ndarray().tobytes()
+                out += pcm(f)
         for f in resampler.resample(None):
-            out += f.to_ndarray().tobytes()
+            out += pcm(f)
     return bytes(out)
 
 
