@@ -991,6 +991,7 @@ def audio_tts(payload: TTSPayload, user=Depends(require_user)):
 
 class IELTSProfilePayload(BaseModel):
     exam_type: str = "Academic"
+    feedback_language: Literal["en", "ru", "kk"] | None = None
     planned_exam_date: str | None = None
 
 
@@ -1033,12 +1034,27 @@ def _normalize_answer(value) -> str:
 @router.get("/ielts/dashboard")
 def ielts_dashboard(user=Depends(require_user)):
     ensure_profile(user["id"], user.get("email"))
-    return get_ielts_dashboard(user["id"])
+    data = get_ielts_dashboard(user["id"])
+    data["feedback_language"] = _feedback_lang(user["id"])
+    return data
+
+
+def _feedback_lang(user_id: str) -> str:
+    """Language of AI feedback chosen on the IELTS Dashboard (profiles.preferred_explanation_language)."""
+    try:
+        rows = admin_db().table("profiles").select("preferred_explanation_language").eq("id", user_id).limit(1).execute().data
+        lang = (rows or [{}])[0].get("preferred_explanation_language") or "en"
+        return lang if lang in ("en", "ru", "kk") else "en"
+    except Exception:
+        return "en"
 
 
 @router.post("/ielts/profile")
 def ielts_profile(payload: IELTSProfilePayload, user=Depends(require_user)):
     ensure_ielts_profile(user["id"])
+    if payload.feedback_language:
+        admin_db().table("profiles").update({"preferred_explanation_language": payload.feedback_language}) \
+            .eq("id", user["id"]).execute()
     return update_ielts_profile(user["id"], payload.model_dump())
 
 
@@ -1091,7 +1107,7 @@ def ielts_writing_assess(payload: IELTSWritingAssessPayload, user=Depends(requir
     ensure_ielts_profile(user["id"])
     try:
         result = ielts_assess_writing(payload.test_type, payload.task_number, payload.prompt, payload.response,
-                                      payload.chart)
+                                      payload.chart, _feedback_lang(user["id"]))
     except Exception:
         logger.exception("Writing assessment failed")
         raise HTTPException(status_code=503, detail=f"{AI_DOWN} Your text is still on the page — "
@@ -1109,7 +1125,7 @@ def ielts_speaking_generate(payload: IELTSSpeakingGeneratePayload, user=Depends(
 @router.post("/ielts/speaking/assess")
 def ielts_speaking_assess(payload: IELTSSpeakingAssessPayload, user=Depends(require_user)):
     ensure_ielts_profile(user["id"])
-    result = ielts_assess_speaking(payload.part, payload.prompt, payload.transcript)
+    result = ielts_assess_speaking(payload.part, payload.prompt, payload.transcript, _feedback_lang(user["id"]))
     save_ielts_speaking(user["id"], payload.part, payload.prompt, payload.transcript, result)
     return result
 
@@ -1204,7 +1220,7 @@ def _speaking_fill_transcripts(session: dict) -> bool:
     return done
 
 
-def _speaking_add_pronunciation(session: dict, result: dict, parts: list[int]) -> float:
+def _speaking_add_pronunciation(session: dict, result: dict, parts: list[int], language: str = "en") -> float:
     """Listen to the recorded answers and add Pronunciation; returns the Speaking band."""
     language = [result.get("fluency_coherence"), result.get("lexical_resource"), result.get("grammatical_range_accuracy")]
     turns = ielts_pronunciation.pick_turns([t for t in session["turns"] if t["part"] in parts])
@@ -1215,7 +1231,7 @@ def _speaking_add_pronunciation(session: dict, result: dict, parts: list[int]) -
         except Exception:
             logger.exception("Could not load a speaking recording")
     transcript = "\n\n".join(v for k, v in ielts_speaking.transcripts_by_part(session).items() if int(k) in parts)
-    pron = ielts_pronunciation.assess(recordings, transcript) if recordings else None
+    pron = ielts_pronunciation.assess(recordings, transcript, language) if recordings else None
     if not pron:
         result["pronunciation"] = None
         return float(result.get("provisional_language_band") or 0)
@@ -1309,13 +1325,14 @@ def ielts_speaking_session_assess(session_id: str, user=Depends(require_user)):
     material = content.get("material") or {}
     prompt = material.get("cue_card") or "\n".join(material.get("questions") or [])
     try:
-        result = ielts_assess_speaking(part, prompt, transcript)
+        lang = _feedback_lang(user["id"])
+        result = ielts_assess_speaking(part, prompt, transcript, lang)
     except Exception:
         logger.exception("Speaking assessment failed")
         _practice_session_save(session_id, content)
         raise unavailable
     result["transcript"] = transcript
-    _speaking_add_pronunciation(session, result, [part])
+    _speaking_add_pronunciation(session, result, [part], lang)
     save_ielts_speaking(user["id"], part, prompt, transcript, result)
     content["result"] = result
     _practice_session_save(session_id, content)
@@ -1632,7 +1649,7 @@ def _mock_assess_writing(user_id: str, mock_id: str, test_type: str) -> None:
             row = mock_get_section(user_id, mock_id, "writing", task)
             text = str((row.get("answers") or {}).get("response") or "").strip()
             results[task] = (ielts_assess_writing(test_type, task, row["content"]["prompt"], text,
-                                                  row["content"].get("chart"))
+                                                  row["content"].get("chart"), _feedback_lang(user_id))
                              if len(text.split()) >= 20 else blank())
             mock_complete_section(user_id, mock_id, "writing", task, estimated_band=results[task]["overall_band"],
                                   result=results[task])
@@ -1882,11 +1899,12 @@ def _mock_assess_speaking(user_id: str, mock_id: str) -> bool:
         row = mock_get_section(user_id, mock_id, "speaking", p)
         parts[f"part{p}"] = {"prompt": (row or {}).get("content"), "transcript": transcripts.get(str(p), "(no answer)")}
     try:
-        result = mock_assess_full_speaking(parts)
+        lang = _feedback_lang(user_id)
+        result = mock_assess_full_speaking(parts, lang)
     except Exception:
         logger.exception("Speaking assessment unavailable")
         return False
-    band = _speaking_add_pronunciation(session, result, [1, 2, 3])
+    band = _speaking_add_pronunciation(session, result, [1, 2, 3], lang)
     for p in (1, 2, 3):
         row = mock_get_section(user_id, mock_id, "speaking", p)
         mock_complete_section(user_id, mock_id, "speaking", p, estimated_band=band, result=result,

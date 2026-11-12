@@ -5,6 +5,8 @@ from typing import Any
 from app.services.openai_service import ask_json
 from app.services.ielts_scoring import criterion, criteria_band
 from app.agents.ielts_visuals import CHART_SPEC, pick_type, clean_chart, chart_as_text
+from app.agents.ielts_rubrics import (DATA_GUARD, WRITING_DESCRIPTORS, SPEAKING_DESCRIPTORS,
+                                      learner_block, language_rule)
 
 # One difficulty for every candidate, as in the real exam (no per-learner simplification).
 EXAM_LEVEL = (
@@ -45,7 +47,8 @@ For Task 2 create an essay prompt suitable for either test type.
     return ask_json(instructions, request)
 
 
-def assess_writing(test_type: str, task_number: int, prompt: str, response: str, chart: dict | None = None) -> dict:
+def assess_writing(test_type: str, task_number: int, prompt: str, response: str, chart: dict | None = None,
+                   language: str = "en") -> dict:
     criterion_key = "task_achievement" if task_number == 1 else "task_response"
     instructions = f"""
 You are an IELTS preparation writing coach. This is formative AI feedback, NOT an official IELTS score.
@@ -62,18 +65,29 @@ error_examples (array of up to 5 objects with original, correction, explanation)
 next_task (string),
 disclaimer (string).
 Each criterion is awarded in whole bands, as by IELTS examiners; use the full 0-9 range (band 9 is possible).
-Task 1 should normally be at least 150 words; Task 2 at least 250 words. Treat length as evidence/coverage, not a mechanical score penalty.
+{WRITING_DESCRIPTORS}
+{DATA_GUARD}
+{language_rule(language)}
 """
     data = ask_json(
         instructions,
-        f"Test type: {test_type}\nTask number: {task_number}\nPrompt:\n{prompt}{chart_as_text(chart)}"
-        f"\n\nLearner response:\n{response}",
+        f"Test type: {test_type}\nTask number: {task_number}\nMinimum words: {150 if task_number == 1 else 250}\n"
+        f"Word count of the response: {len(response.split())}\nPrompt:\n{prompt}{chart_as_text(chart)}"
+        f"\n\nLearner response:\n{learner_block(response)}",
     )
     keys = [criterion_key, "coherence_cohesion", "lexical_resource", "grammatical_range_accuracy"]
     for key in keys:
         data[key] = criterion(data.get(key))
+    words = len(response.split())
+    minimum = 150 if task_number == 1 else 250
+    if words <= 20:  # IELTS rule: 20 words or fewer = band 1 in every criterion
+        for key in keys:
+            data[key] = 1
+    elif words < minimum * 2 / 3:  # app rule: a substantially short response cannot cover the task
+        data[criterion_key] = min(data[criterion_key], 5)
+    data["underlength"] = words < minimum
     data["overall_band"] = criteria_band([data[k] for k in keys])  # computed here, not by the model
-    data["word_count"] = len(response.split())
+    data["word_count"] = words
     data["disclaimer"] = "AI practice estimate only; an official IELTS band can only be awarded through an official test process."
     return data
 
@@ -90,7 +104,7 @@ For Part 3: questions = 6 abstract discussion questions related to a plausible P
     return ask_json(instructions, f"Speaking Part {part}. {EXAM_LEVEL}")
 
 
-def assess_speaking_transcript(part: int, prompt: str, transcript: str) -> dict:
+def assess_speaking_transcript(part: int, prompt: str, transcript: str, language: str = "en") -> dict:
     instructions = """
 You are an IELTS Speaking preparation coach reviewing a transcript only.
 Return ONLY JSON with exactly:
@@ -104,8 +118,8 @@ better_phrasing (array of up to 5 objects with original, improved),
 follow_up_question (string),
 disclaimer (string).
 Because you only have a transcript, DO NOT score pronunciation. Criteria are whole bands; use the full 0-9 range.
-"""
-    data = ask_json(instructions, f"Part: {part}\nPrompt:\n{prompt}\n\nTranscript:\n{transcript}")
+""" + SPEAKING_DESCRIPTORS + DATA_GUARD + "\n" + language_rule(language)
+    data = ask_json(instructions, f"Part: {part}\nPrompt:\n{prompt}\n\nTranscript:\n{learner_block(transcript)}")
     keys = ["fluency_coherence", "lexical_resource", "grammatical_range_accuracy"]
     for key in keys:
         data[key] = criterion(data.get(key))

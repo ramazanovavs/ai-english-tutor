@@ -215,8 +215,9 @@
             <span class="badge text-bg-warning">AI practice estimates — not official IELTS scores</span>
           </div>
           <div class="row g-2 mb-4">
-            <div class="col-md-5"><label class="form-label">Test type</label><select id="ieltsExamType" class="form-select"><option>Academic</option><option>General Training</option></select></div>
-            <div class="col-md-5"><label class="form-label">Planned exam</label><input id="ieltsExamDate" type="date" class="form-control"></div>
+            <div class="col-md-4"><label class="form-label">Test type</label><select id="ieltsExamType" class="form-select"><option>Academic</option><option>General Training</option></select></div>
+            <div class="col-md-3"><label class="form-label">Feedback language</label><select id="ieltsFeedbackLang" class="form-select"><option value="en">English</option><option value="ru">Русский</option><option value="kk">Қазақша</option></select></div>
+            <div class="col-md-3"><label class="form-label">Planned exam</label><input id="ieltsExamDate" type="date" class="form-control"></div>
             <div class="col-md-2 d-grid align-self-end"><button class="btn btn-primary" onclick="saveIELTSProfile()">Save</button></div>
           </div>
           <div id="ieltsBandCards" class="row g-3"></div>

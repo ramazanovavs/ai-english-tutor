@@ -800,6 +800,7 @@ async function loadIELTSDashboard() {
     const p = d.profile || {};
     document.getElementById("ieltsExamType").value = p.exam_type || "Academic";
     document.getElementById("ieltsExamDate").value = p.planned_exam_date || "";
+    document.getElementById("ieltsFeedbackLang").value = d.feedback_language || "en";
     document.getElementById("ieltsBandCards").innerHTML = [
       bandCard("Overall", p.current_overall_band), bandCard("Listening", p.listening_band),
       bandCard("Reading", p.reading_band), bandCard("Writing", p.writing_band), bandCard("Speaking", p.speaking_band)
@@ -821,7 +822,8 @@ async function loadIELTSDashboard() {
 async function saveIELTSProfile() {
   const payload = {
     exam_type: document.getElementById("ieltsExamType").value,
-    planned_exam_date: document.getElementById("ieltsExamDate").value || null
+    planned_exam_date: document.getElementById("ieltsExamDate").value || null,
+    feedback_language: document.getElementById("ieltsFeedbackLang").value
   };
   try {
     await api("/api/ielts/profile", {method:"POST", body:JSON.stringify(payload)});
@@ -870,6 +872,7 @@ async function assessIELTSWriting() {
         ${bandCard("Lexical Resource", d.lexical_resource)}
         ${bandCard("Grammar", d.grammatical_range_accuracy)}
       </div>
+      ${d.underlength ? `<div class="alert alert-warning small">Your response is under the minimum length (${task === 1 ? 150 : 250} words). In the exam this lowers ${task === 1 ? "Task Achievement" : "Task Response"}.</div>` : ""}
       <p class="small text-secondary">${esc(d.word_count)} words · ${esc(d.disclaimer)}</p>
       <h6>Strengths</h6><ul>${(d.strengths||[]).map(x=>`<li>${esc(x)}</li>`).join("")}</ul>
       <h6>How to improve</h6>${(d.improvements||[]).map(x=>`<div class="mb-2"><strong>${esc(x.criterion)}:</strong> ${esc(x.issue)}<br><span class="text-secondary">Action: ${esc(x.action)}</span></div>`).join("")}

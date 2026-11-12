@@ -4,6 +4,7 @@ from app.services.openai_service import ask_json
 from app.agents.ielts_agent import EXAM_LEVEL
 from app.services.ielts_scoring import criterion, criteria_band
 from app.agents.ielts_visuals import CHART_SPEC, pick_type, clean_chart
+from app.agents.ielts_rubrics import SPEAKING_DESCRIPTORS, DATA_GUARD, learner_block, language_rule
 
 
 LISTENING_CONTEXTS = {
@@ -202,7 +203,7 @@ Make the progression natural and coherent.
     return ask_json(instructions, EXAM_LEVEL)
 
 
-def assess_full_speaking(parts: dict) -> dict:
+def assess_full_speaking(parts: dict, language: str = "en") -> dict:
     instructions = """
 You are an IELTS Speaking preparation coach assessing a complete mock interview from TRANSCRIPTS ONLY.
 This is formative AI feedback, not an official score.
@@ -220,8 +221,8 @@ disclaimer (string).
 
 Do NOT score pronunciation because no acoustic evidence is available.
 Criteria are whole bands; use the full 0-9 range.
-"""
-    data = ask_json(instructions, f"Mock speaking data:\n{parts}")
+""" + SPEAKING_DESCRIPTORS + DATA_GUARD + "\n" + language_rule(language)
+    data = ask_json(instructions, "Mock speaking data:\n" + learner_block(str(parts)))
     keys = ["fluency_coherence", "lexical_resource", "grammatical_range_accuracy"]
     for key in keys:
         data[key] = criterion(data.get(key))
