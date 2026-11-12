@@ -1067,6 +1067,16 @@ let mockSubmitting = false;
 const MOCK_SECTION_LABEL = {listening: "Listening", reading: "Reading", writing: "Writing", speaking: "Speaking"};
 
 function mockNow() { return Date.now() + mockClockOffset; }
+
+let mockHeartbeat = null;
+
+function isSmallDevice() {
+  return window.innerWidth < 992 || window.matchMedia("(pointer: coarse)").matches;
+}
+
+function showMockDeviceWarning() {
+  document.getElementById("mockDeviceWarning")?.classList.toggle("d-none", !isSmallDevice());
+}
 function mockSyncClock(serverTime) {
   if (serverTime) mockClockOffset = new Date(serverTime).getTime() - Date.now();
 }
@@ -1104,10 +1114,14 @@ function startMockDeadline(deadlineIso, onExpire, label = "Section time") {
   };
   draw();
   mockTimerHandle = setInterval(draw, 1000);
+  // Keep the free Render instance awake while a section runs (it sleeps after 15 min without requests).
+  clearInterval(mockHeartbeat);
+  mockHeartbeat = setInterval(() => fetch("/health").catch(() => {}), 4 * 60 * 1000);
 }
 
 function stopMockTimers() {
   clearInterval(mockTimerHandle);
+  clearInterval(mockHeartbeat);
   clearTimeout(mockSaveTimer);
   clearTimeout(mockPollTimer);
   mockListeningRun++;
@@ -1125,6 +1139,7 @@ async function startFullIELTSMock() {
   const test_type = document.getElementById("mockTestType").value;
   const source = document.getElementById("mockSource")?.value || "new";
   const btn = document.getElementById("mockStartBtn");
+  if (isSmallDevice() && !confirm("The IELTS exam is taken on a computer. On this device the result will not be reliable. Start anyway?")) return;
   if (btn) { btn.disabled = true; btn.textContent = "Starting…"; }
   try {
     fullMock = await api("/api/ielts/mock/start", {method: "POST", body: JSON.stringify({test_type, source})});
@@ -1682,7 +1697,7 @@ function resetFullIELTSMock() {
 const openPageBeforeFullMock = openPage;
 openPage = function(name) {
   openPageBeforeFullMock(name);
-  if (name === "ielts-mock") resumeFullIELTSMock();
+  if (name === "ielts-mock") { showMockDeviceWarning(); resumeFullIELTSMock(); }
 };
 
 window.addEventListener("beforeunload", e => {
