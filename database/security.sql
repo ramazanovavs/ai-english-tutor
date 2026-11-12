@@ -55,3 +55,16 @@ create table if not exists public.user_consents (
 alter table public.user_consents enable row level security;
 
 revoke all on public.ai_usage, public.user_consents from anon, authenticated;
+
+-- 4) Monthly check of AI scoring on a fixed control set (drift after model updates).
+create table if not exists public.ai_calibration_runs (
+    id uuid primary key default gen_random_uuid(),
+    created_at timestamptz not null default now(),
+    model text,
+    status text not null default 'running',     -- running / done / error
+    is_baseline boolean not null default false,
+    results jsonb not null default '[]'::jsonb,
+    error text
+);
+alter table public.ai_calibration_runs enable row level security;
+revoke all on public.ai_calibration_runs from anon, authenticated;

@@ -2809,3 +2809,35 @@ def admin_ai_usage(user=Depends(require_user)):
     return {"today": ai_gateway.today_summary(), "days": days[:30], "top_users_today": top,
             "limits": {k: getattr(get_settings(), k) for k in ("ai_user_calls_per_10min", "ai_user_calls_per_day",
                                                                  "ai_user_tts_chars_per_day", "ai_daily_calls_limit")}}
+
+
+# ========================= ADMIN: monthly check of AI scoring =========================
+
+@router.get("/admin/calibration")
+def admin_calibration(user=Depends(require_user)):
+    _require_admin(user)
+    from app.services import calibration
+    try:
+        return calibration.overview()
+    except Exception:
+        logger.exception("Calibration overview failed")
+        return {"runs": [], "error": "The calibration table is not set up yet: run database/security.sql."}
+
+
+@router.post("/admin/calibration/run")
+def admin_calibration_run(user=Depends(require_user)):
+    _require_admin(user)
+    from app.services import calibration
+    try:
+        return {"id": calibration.start_run()}
+    except Exception:
+        logger.exception("Calibration run could not start")
+        raise HTTPException(status_code=503, detail="The calibration table is not set up yet: run database/security.sql.")
+
+
+@router.post("/admin/calibration/{run_id}/baseline")
+def admin_calibration_baseline(run_id: str, user=Depends(require_user)):
+    _require_admin(user)
+    from app.services import calibration
+    calibration.set_baseline(run_id)
+    return {"ok": True}

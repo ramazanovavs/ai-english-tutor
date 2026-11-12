@@ -3940,7 +3940,7 @@ async function loadFeedback() {
   renderFeedback([]);
   try { const d = await api("/api/feedback/mine"); renderFeedback(d.items || []); } catch (e) {}
   if (currentProfile?.is_admin) loadFeedbackAdmin();
-  if (currentProfile?.is_admin) loadAIUsageAdmin();
+  if (currentProfile?.is_admin) { loadAIUsageAdmin(); loadCalibrationAdmin(); }
 }
 
 function renderFeedback(mine) {
@@ -3972,7 +3972,7 @@ function renderFeedback(mine) {
     <div class="card-soft mt-4"><h5>${esc(T("fb_mine"))}</h5>
       ${mine.length ? mine.map(m => `<div class="fb-item"><div class="small text-secondary">${esc(fmtDate(m.created_at))} · ${esc(m.section)} · ${esc(T("fb_kind_" + m.kind).split(" — ")[0])}${m.rating ? " · " + "★".repeat(m.rating) : ""} · <span class="badge text-bg-light">${esc(st(m.status))}</span></div>
         <div style="white-space:pre-line">${esc(m.comment)}</div></div>`).join("") : `<div class="text-secondary">${esc(T("fb_none"))}</div>`}</div>
-    <div id="feedbackAdmin"></div><div id="aiUsageAdmin"></div>`;
+    <div id="feedbackAdmin"></div><div id="aiUsageAdmin"></div><div id="calibrationAdmin"></div>`;
   feedbackRating = 0;
   setFeedbackRating(0);
   if (feedbackAdmin) renderFeedbackAdmin();
@@ -4132,4 +4132,47 @@ async function loadAIUsageAdmin() {
       ${days.slice(0, 14).map(x => `<tr><td>${esc(x.date)}</td><td>${esc(x.calls)}</td><td>${esc(x.errors)}</td><td>${esc(x.cost)}</td></tr>`).join("")}</tbody></table>
     <h6>Most active today</h6>${(d.top_users_today || []).map(u => `<div class="small">${esc(u.user)} — ${esc(u.calls)} calls, ≈ $${esc(u.cost)}</div>`).join("") || '<div class="small text-secondary">—</div>'}
     <div class="small text-secondary mt-2">Cost is an estimate from the prices in the settings; the exact bill is in the OpenAI dashboard.</div></div>`;
+}
+
+// ========================= Admin: monthly check of AI scoring (control set) =========================
+let calibrationTimer = null;
+
+async function loadCalibrationAdmin() {
+  const box = document.getElementById("calibrationAdmin");
+  if (!box || !currentProfile?.is_admin) return;
+  let d;
+  try { d = await api("/api/admin/calibration"); } catch (e) { box.innerHTML = ""; return; }
+  if (d.error) { box.innerHTML = `<div class="alert alert-warning mt-4">${esc(d.error)}</div>`; return; }
+  const running = d.runs.some(r => r.status === "running");
+  const runRow = r => {
+    const cells = (r.rows || []).map(x => {
+      const band = x.band != null ? x.band.toFixed(1) : "—";
+      const shift = x.band_shift != null && x.band_shift !== 0 ? ` (${x.band_shift > 0 ? "+" : ""}${x.band_shift.toFixed(1)})` : "";
+      const cshift = x.cefr_shift ? ` (${x.cefr_shift > 0 ? "+" : ""}${x.cefr_shift})` : "";
+      return `<td class="${x.flag ? "table-warning" : ""}">${esc(band)}${esc(shift)} · ${esc(x.cefr || "—")}${esc(cshift)}</td>`;
+    }).join("");
+    const status = r.status === "running" ? "⏳" : r.status === "error" ? `⚠️ ${esc(r.error || "")}`
+      : r.is_baseline ? "📌 baseline" : r.drift ? "⚠️ drift" : "✅";
+    return `<tr><td>${esc(fmtDate(r.created_at))}</td><td class="small">${esc(r.model || "")}</td>${cells || `<td colspan="4"></td>`}
+      <td>${status}</td><td>${r.status === "done" && !r.is_baseline ? `<button class="btn btn-sm btn-outline-secondary" onclick="setCalibrationBaseline('${r.id}')">baseline</button>` : ""}</td></tr>`;
+  };
+  box.innerHTML = `<div class="card-soft mt-4"><h5>Monthly check of AI scoring <span class="badge text-bg-secondary">admin</span></h5>
+    <div class="small text-secondary mb-2">The same ${esc(d.texts)} control essays are scored again (IELTS band · CEFR from Writing Coach) and compared with the baseline run.
+      Warning when: ${esc(d.drift_rule)}. Run once a month and after any model change.</div>
+    <button class="btn btn-sm btn-primary mb-2" ${running ? "disabled" : ""} onclick="runCalibration()">${running ? "Running…" : "Run the check (≈ 8 AI calls)"}</button>
+    <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>Date</th><th>Model</th>
+      <th>Essay 1 (≈4.5/A2)</th><th>Essay 2 (≈5.5/B1)</th><th>Essay 3 (≈6.5/B2)</th><th>Essay 4 (≈7.5/C1)</th><th></th><th></th></tr></thead>
+      <tbody>${d.runs.map(runRow).join("") || `<tr><td colspan="8" class="text-secondary">No runs yet. The first run becomes the baseline.</td></tr>`}</tbody></table></div></div>`;
+  clearTimeout(calibrationTimer);
+  if (running) calibrationTimer = setTimeout(loadCalibrationAdmin, 5000);
+}
+
+async function runCalibration() {
+  try { await api("/api/admin/calibration/run", {method: "POST", body: "{}"}); loadCalibrationAdmin(); }
+  catch (e) { rmToast(e.message); }
+}
+
+async function setCalibrationBaseline(id) {
+  try { await api(`/api/admin/calibration/${id}/baseline`, {method: "POST", body: "{}"}); loadCalibrationAdmin(); }
+  catch (e) { rmToast(e.message); }
 }
