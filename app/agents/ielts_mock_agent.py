@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from app.services.openai_service import ask_json
+from app.agents.ielts_agent import EXAM_LEVEL
+from app.services.ielts_scoring import criterion, criteria_band
 
 
-def generate_listening_part(part: int, target_band: float = 6.5) -> dict:
+def generate_listening_part(part: int) -> dict:
     contexts = {
         1: "an everyday social conversation between two speakers, such as booking, services, travel, or accommodation",
         2: "one speaker giving information about an everyday social setting, local facility, event, or service",
@@ -38,11 +40,11 @@ Do not reveal answers in question wording.
 """
     return ask_json(
         instructions,
-        f"Part: {part}\nSituation: {contexts[part]}\nTarget learner band: {target_band}.",
+        f"Part: {part}\nSituation: {contexts[part]}\n{EXAM_LEVEL}",
     )
 
 
-def generate_reading_section(test_type: str, section: int, target_band: float = 6.5) -> dict:
+def generate_reading_section(test_type: str, section: int) -> dict:
     kind = "General Training" if test_type.lower().startswith("general") else "Academic"
     counts = {1: 13, 2: 13, 3: 14}
     if kind == "Academic":
@@ -91,11 +93,11 @@ Questions and keys must be unambiguous from the passage.
 """
     return ask_json(
         instructions,
-        f"Test type: {kind}\nReading section: {section}\nTarget learner band: {target_band}.",
+        f"Test type: {kind}\nReading section: {section}\n{EXAM_LEVEL}",
     )
 
 
-def generate_full_writing(test_type: str, target_band: float = 6.5) -> dict:
+def generate_full_writing(test_type: str) -> dict:
     kind = "General Training" if test_type.lower().startswith("general") else "Academic"
     instructions = """
 Create a complete original IELTS-style Writing mock paper with Task 1 and Task 2.
@@ -113,10 +115,10 @@ Task 2: create a clear essay prompt based on a point of view, argument, or probl
 Task 1 minimum 150 words / suggested 20 minutes.
 Task 2 minimum 250 words / suggested 40 minutes.
 """
-    return ask_json(instructions, f"Test type: {kind}\nTarget learner band: {target_band}.")
+    return ask_json(instructions, f"Test type: {kind}\n{EXAM_LEVEL}")
 
 
-def generate_full_speaking(target_band: float = 6.5) -> dict:
+def generate_full_speaking() -> dict:
     instructions = """
 Create a complete original IELTS-style Speaking mock interview.
 Do not reproduce published IELTS questions.
@@ -132,7 +134,7 @@ part3: object with title, instructions, questions (array of 6 abstract discussio
 
 Make the progression natural and coherent.
 """
-    return ask_json(instructions, f"Target learner band: {target_band}.")
+    return ask_json(instructions, EXAM_LEVEL)
 
 
 def assess_full_speaking(parts: dict) -> dict:
@@ -141,11 +143,10 @@ You are an IELTS Speaking preparation coach assessing a complete mock interview 
 This is formative AI feedback, not an official score.
 
 Return JSON with exactly:
-fluency_coherence (0-9 in 0.5 steps),
-lexical_resource (0-9 in 0.5 steps),
-grammatical_range_accuracy (0-9 in 0.5 steps),
+fluency_coherence (whole number 0-9),
+lexical_resource (whole number 0-9),
+grammatical_range_accuracy (whole number 0-9),
 pronunciation (null),
-provisional_language_band (0-9 in 0.5 steps),
 strengths (array of 4 concise strings),
 improvements (array of 4 objects with criterion, issue, action),
 part_feedback (object with keys part1, part2, part3),
@@ -153,6 +154,12 @@ next_steps (array of 3 strings),
 disclaimer (string).
 
 Do NOT score pronunciation because no acoustic evidence is available.
-provisional_language_band must average only the three transcript-observable criteria and be rounded to the nearest 0.5.
+Criteria are whole bands; use the full 0-9 range.
 """
-    return ask_json(instructions, f"Mock speaking data:\n{parts}")
+    data = ask_json(instructions, f"Mock speaking data:\n{parts}")
+    keys = ["fluency_coherence", "lexical_resource", "grammatical_range_accuracy"]
+    for key in keys:
+        data[key] = criterion(data.get(key))
+    data["pronunciation"] = None
+    data["provisional_language_band"] = criteria_band([data[k] for k in keys])
+    return data

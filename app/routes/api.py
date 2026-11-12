@@ -24,6 +24,7 @@ from app.services import listening_audio, listening_bank
 from app.config import get_settings
 from app.agents.assessment_agent import generate as generate_test
 from app.services.openai_service import ask_text, ask_json, transcribe_audio, synthesize_speech
+from app.services.ielts_scoring import overall_band as ielts_overall_band, writing_band as ielts_writing_band
 from app.agents.ielts_agent import (
     generate_writing_prompt as ielts_generate_writing_prompt,
     assess_writing as ielts_assess_writing,
@@ -987,14 +988,12 @@ def audio_tts(payload: TTSPayload, user=Depends(require_user)):
 
 class IELTSProfilePayload(BaseModel):
     exam_type: str = "Academic"
-    target_band: float = Field(default=6.5, ge=1.0, le=9.0)
     planned_exam_date: str | None = None
 
 
 class IELTSWritingPromptPayload(BaseModel):
     test_type: str = "Academic"
     task_number: int = Field(default=2, ge=1, le=2)
-    target_band: float = Field(default=6.5, ge=1.0, le=9.0)
 
 
 class IELTSWritingAssessPayload(BaseModel):
@@ -1006,7 +1005,6 @@ class IELTSWritingAssessPayload(BaseModel):
 
 class IELTSSpeakingGeneratePayload(BaseModel):
     part: int = Field(default=1, ge=1, le=3)
-    target_band: float = Field(default=6.5, ge=1.0, le=9.0)
 
 
 class IELTSSpeakingAssessPayload(BaseModel):
@@ -1017,36 +1015,15 @@ class IELTSSpeakingAssessPayload(BaseModel):
 
 class IELTSPracticeGeneratePayload(BaseModel):
     test_type: str = "Academic"
-    target_band: float = Field(default=6.5, ge=1.0, le=9.0)
 
 
 class IELTSObjectiveSubmitPayload(BaseModel):
-    section: str
-    test_type: str = "Academic"
-    title: str
-    questions: list[dict]
-    answer_key: dict[str, str]
-    explanations: dict[str, str] = {}
+    test_id: str
     answers: dict[str, str]
 
 
 def _normalize_answer(value) -> str:
     return " ".join(str(value or "").strip().lower().split())
-
-
-def _estimate_ielts_band(section: str, correct: int, total: int, test_type: str) -> float:
-    if total <= 0:
-        return 0.0
-    pct = correct / total
-    # Formative approximation for short practice sets, not official score conversion.
-    if section == "reading" and test_type.lower().startswith("general"):
-        cuts = [(0.90, 7.0), (0.80, 6.5), (0.70, 6.0), (0.58, 5.5), (0.45, 5.0), (0.30, 4.0)]
-    else:
-        cuts = [(0.88, 8.0), (0.75, 7.0), (0.60, 6.0), (0.48, 5.5), (0.38, 5.0), (0.25, 4.0)]
-    for threshold, band in cuts:
-        if pct >= threshold:
-            return band
-    return 3.0
 
 
 @router.get("/ielts/dashboard")
@@ -1064,7 +1041,7 @@ def ielts_profile(payload: IELTSProfilePayload, user=Depends(require_user)):
 @router.post("/ielts/writing/generate")
 def ielts_writing_generate(payload: IELTSWritingPromptPayload, user=Depends(require_user)):
     ensure_ielts_profile(user["id"])
-    return ielts_generate_writing_prompt(payload.test_type, payload.task_number, payload.target_band)
+    return ielts_generate_writing_prompt(payload.test_type, payload.task_number)
 
 
 @router.post("/ielts/writing/assess")
@@ -1072,15 +1049,13 @@ def ielts_writing_assess(payload: IELTSWritingAssessPayload, user=Depends(requir
     ensure_ielts_profile(user["id"])
     result = ielts_assess_writing(payload.test_type, payload.task_number, payload.prompt, payload.response)
     save_ielts_writing(user["id"], payload.test_type, payload.task_number, payload.prompt, payload.response, result)
-    # Feed the general student model too, using a simple 0-100 transformation.
-    record_activity(user["id"], "writing", f"IELTS Writing Task {payload.task_number}", round(float(result.get("overall_band", 0)) / 9 * 100), result)
-    return result
+    return result  # IELTS stays separate from the general (CEFR) progress
 
 
 @router.post("/ielts/speaking/generate")
 def ielts_speaking_generate(payload: IELTSSpeakingGeneratePayload, user=Depends(require_user)):
     ensure_ielts_profile(user["id"])
-    return ielts_generate_speaking_set(payload.part, payload.target_band)
+    return ielts_generate_speaking_set(payload.part)
 
 
 @router.post("/ielts/speaking/assess")
@@ -1088,54 +1063,134 @@ def ielts_speaking_assess(payload: IELTSSpeakingAssessPayload, user=Depends(requ
     ensure_ielts_profile(user["id"])
     result = ielts_assess_speaking(payload.part, payload.prompt, payload.transcript)
     save_ielts_speaking(user["id"], payload.part, payload.prompt, payload.transcript, result)
-    record_activity(user["id"], "speaking", f"IELTS Speaking Part {payload.part}", round(float(result.get("provisional_language_band", 0)) / 9 * 100), result)
     return result
+
+
+IELTS_LISTENING_VOICE = (
+    "Read this as an IELTS Listening recording at a natural exam pace. "
+    "Use natural intonation and clearly different delivery for different speakers."
+)
+
+
+def _ielts_practice_store(user: dict, section: str, test_type: str, content: dict) -> str:
+    content = dict(content)
+    content["test_type"] = test_type
+    row = admin_db().table("tests").insert({
+        "user_id": user["id"],
+        "title": content.get("title") or f"IELTS {section.title()} practice",
+        "test_type": "ielts_practice",
+        "focus": f"ielts_{section}",
+        "questions": content,  # answer key, explanations and script stay on the server
+    }).execute()
+    return row.data[0]["id"]
+
+
+def _ielts_practice_load(test_id: str, user_id: str) -> dict | None:
+    rows = (
+        admin_db().table("tests").select("*")
+        .eq("id", test_id).eq("user_id", user_id).eq("test_type", "ielts_practice")
+        .limit(1).execute()
+    ).data
+    if not rows:
+        return None
+    content = rows[0].get("questions") or {}
+    content["_section"] = str(rows[0].get("focus", "")).replace("ielts_", "")
+    return content
+
+
+def _ielts_public_questions(content: dict) -> list[dict]:
+    return [
+        {k: q.get(k) for k in ("id", "type", "question", "options", "instruction") if k in q}
+        for q in content.get("questions") or []
+    ]
 
 
 @router.post("/ielts/reading/generate")
 def ielts_reading_generate(payload: IELTSPracticeGeneratePayload, user=Depends(require_user)):
     ensure_ielts_profile(user["id"])
-    return ielts_generate_reading(payload.test_type, payload.target_band)
+    test_type = "General Training" if payload.test_type.lower().startswith("general") else "Academic"
+    content = ielts_generate_reading(test_type)
+    test_id = _ielts_practice_store(user, "reading", test_type, content)
+    return {"test_id": test_id, "title": content.get("title"), "passage": content.get("passage"),
+            "questions": _ielts_public_questions(content)}
 
 
 @router.post("/ielts/listening/generate")
 def ielts_listening_generate(payload: IELTSPracticeGeneratePayload, user=Depends(require_user)):
     ensure_ielts_profile(user["id"])
-    return ielts_generate_listening(payload.target_band)
+    content = ielts_generate_listening()
+    test_id = _ielts_practice_store(user, "listening", "Academic", content)
+    script = content.get("audio_script") or ""
+    listening_audio.start(
+        test_id, user["id"], builder=lambda: synthesize_speech(script, instructions=IELTS_LISTENING_VOICE),
+        max_plays=1,
+    )
+    return {"test_id": test_id, "title": content.get("title"), "max_plays": 1,
+            "questions": _ielts_public_questions(content)}
+
+
+@router.get("/ielts/practice/{test_id}/audio")
+def ielts_practice_audio(test_id: str, user=Depends(require_user)):
+    def loader():
+        c = _ielts_practice_load(test_id, user["id"])
+        return c if c and c.get("_section") == "listening" else None
+
+    def audio_loader(c):
+        script = c.get("audio_script") or ""
+        return lambda: synthesize_speech(script, instructions=IELTS_LISTENING_VOICE)
+
+    try:
+        audio, plays_left = listening_audio.get_for_play(test_id, user["id"], loader, audio_loader, max_plays=1)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except TimeoutError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    headers = {"Cache-Control": "no-store"}
+    if plays_left is not None:
+        headers["X-Plays-Left"] = str(plays_left)
+    return StreamingResponse(BytesIO(audio), media_type="audio/mpeg", headers=headers)
 
 
 @router.post("/ielts/objective/submit")
 def ielts_objective_submit(payload: IELTSObjectiveSubmitPayload, user=Depends(require_user)):
-    section = payload.section.lower().strip()
-    if section not in {"reading", "listening"}:
-        raise HTTPException(status_code=400, detail="Section must be reading or listening.")
-    correct = 0
-    details = []
-    for q in payload.questions:
+    """Short practice sets are checked against the key stored on the server.
+    No band is given: 10 questions are too few for a reliable IELTS band."""
+    content = _ielts_practice_load(payload.test_id, user["id"])
+    if not content:
+        raise HTTPException(status_code=404, detail="Practice set not found.")
+    section = content["_section"]
+    key = content.get("answer_key") or {}
+    explanations = content.get("explanations") or {}
+    correct, details = 0, []
+    for q in content.get("questions") or []:
         qid = str(q.get("id"))
         given = payload.answers.get(qid, "")
-        expected = payload.answer_key.get(qid, "")
-        ok = _normalize_answer(given) == _normalize_answer(expected)
+        accepted = key.get(qid, "")
+        ok = _mock_match_answer(given, accepted)
         correct += int(ok)
         details.append({
-            "id": qid,
-            "correct": ok,
-            "answer": given,
-            "expected": expected,
-            "explanation": payload.explanations.get(qid, ""),
+            "id": qid, "correct": ok, "answer": given,
+            "expected": accepted if isinstance(accepted, str) else " / ".join(map(str, accepted)),
+            "explanation": explanations.get(qid, ""),
         })
-    total = max(len(payload.questions), 1)
+    total = max(len(content.get("questions") or []), 1)
     pct = round(correct / total * 100)
-    band = _estimate_ielts_band(section, correct, total, payload.test_type)
-    save_ielts_objective(user["id"], section, payload.test_type, payload.title, pct, band, payload.answers, details)
-    record_activity(user["id"], section, f"IELTS {section.title()} practice", pct, {"estimated_band": band, "details": details})
+    save_ielts_objective(user["id"], section, content.get("test_type") or "Academic",
+                         content.get("title") or f"IELTS {section} practice", pct, None, payload.answers, details)
+    if section == "listening":
+        listening_audio.mark_checked(payload.test_id)
     return {
+        "section": section,
         "score_percent": pct,
         "correct": correct,
         "total": total,
-        "estimated_band": band,
         "details": details,
-        "disclaimer": "Band is an approximate practice estimate from a short AI-generated set, not an official IELTS conversion or score.",
+        "transcript": content.get("audio_script") if section == "listening" else None,
+        "note": "Short practice set: percentage and review only. A band is given only for a full 40-question test.",
     }
 
 
@@ -1143,7 +1198,6 @@ def ielts_objective_submit(payload: IELTSObjectiveSubmitPayload, user=Depends(re
 
 class IELTSMockStartPayload(BaseModel):
     test_type: str = "Academic"
-    target_band: float = Field(default=6.5, ge=1.0, le=9.0)
 
 
 class IELTSMockGeneratePayload(BaseModel):
@@ -1205,20 +1259,15 @@ def _mock_band_from_raw(section: str, raw: int, test_type: str) -> float:
     return 1.0
 
 
-def _mock_round_half(value: float) -> float:
-    return round(float(value) * 2) / 2
-
-
 @router.post("/ielts/mock/start")
 def ielts_mock_start(payload: IELTSMockStartPayload, user=Depends(require_user)):
     ensure_profile(user["id"], user.get("email"))
     ensure_ielts_profile(user["id"])
     test_type = "General Training" if payload.test_type.lower().startswith("general") else "Academic"
-    row = mock_start(user["id"], test_type, payload.target_band)
+    row = mock_start(user["id"], test_type)
     return {
         "mock_id": row["id"],
         "test_type": test_type,
-        "target_band": payload.target_band,
         "status": row["status"],
     }
 
@@ -1251,17 +1300,16 @@ def ielts_mock_generate(mock_id: str, payload: IELTSMockGeneratePayload, user=De
             "content": _mock_safe_content(section, existing.get("content") or {}),
         }
 
-    target_band = float((mock.get("metadata") or {}).get("target_band") or 6.5)
     test_type = mock.get("test_type") or "Academic"
 
     if section == "listening":
         if part not in (1, 2, 3, 4):
             raise HTTPException(status_code=400, detail="Listening has Parts 1-4.")
-        content = mock_generate_listening_part(part, target_band)
+        content = mock_generate_listening_part(part)
     elif section == "reading":
         if part not in (1, 2, 3):
             raise HTTPException(status_code=400, detail="Reading has Sections 1-3.")
-        content = mock_generate_reading_section(test_type, part, target_band)
+        content = mock_generate_reading_section(test_type, part)
     elif section == "writing":
         if part != 1:
             raise HTTPException(status_code=400, detail="Generate Writing with part=1.")
@@ -1274,7 +1322,7 @@ def ielts_mock_generate(mock_id: str, payload: IELTSMockGeneratePayload, user=De
                 "section": "writing",
                 "content": {"task1": t1_existing["content"], "task2": t2_existing["content"]},
             }
-        paper = mock_generate_full_writing(test_type, target_band)
+        paper = mock_generate_full_writing(test_type)
         for task_no, key in ((1, "task1"), (2, "task2")):
             mock_save_generated_section(user["id"], mock_id, "writing", task_no, paper[key])
             mock_start_section(user["id"], mock_id, "writing", task_no)
@@ -1294,7 +1342,7 @@ def ielts_mock_generate(mock_id: str, payload: IELTSMockGeneratePayload, user=De
                     "part3": existing_parts[2]["content"],
                 },
             }
-        paper = mock_generate_full_speaking(target_band)
+        paper = mock_generate_full_speaking()
         for pno, key in ((1, "part1"), (2, "part2"), (3, "part3")):
             mock_save_generated_section(user["id"], mock_id, "speaking", pno, paper[key])
             mock_start_section(user["id"], mock_id, "speaking", pno)
@@ -1401,7 +1449,7 @@ def ielts_mock_writing_submit(mock_id: str, payload: IELTSMockWritingSubmitPaylo
     r2 = ielts_assess_writing(mock["test_type"], 2, t2["content"]["prompt"], payload.task2_response)
     b1 = float(r1.get("overall_band") or 0)
     b2 = float(r2.get("overall_band") or 0)
-    writing_band = _mock_round_half((b1 + 2 * b2) / 3)
+    writing_band = ielts_writing_band(b1, b2)
 
     mock_complete_section(user["id"], mock_id, "writing", 1, answers={"response": payload.task1_response}, estimated_band=b1, result=r1)
     mock_complete_section(user["id"], mock_id, "writing", 2, answers={"response": payload.task2_response}, estimated_band=b2, result=r2)
@@ -1437,7 +1485,7 @@ def ielts_mock_speaking_submit(mock_id: str, payload: IELTSMockSpeakingSubmitPay
         parts[f"part{p}"] = {"prompt": row["content"], "transcript": transcript}
 
     result = mock_assess_full_speaking(parts)
-    band = _mock_round_half(float(result.get("provisional_language_band") or 0))
+    band = float(result.get("provisional_language_band") or 0)
     for p in (1, 2, 3):
         row = mock_get_section(user["id"], mock_id, "speaking", p)
         transcript = payload.transcripts[str(p)]
@@ -1464,7 +1512,7 @@ def ielts_mock_finish(mock_id: str, user=Depends(require_user)):
     ]
     if any(x is None for x in bands):
         raise HTTPException(status_code=400, detail="Complete all four IELTS sections before finishing the mock.")
-    overall = _mock_round_half(sum(float(x) for x in bands) / 4)
+    overall = ielts_overall_band([float(x) for x in bands])
     finished = mock_finish(user["id"], mock_id, overall)
 
     db = admin_db()

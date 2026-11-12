@@ -799,7 +799,6 @@ async function loadIELTSDashboard() {
     const d = await api("/api/ielts/dashboard");
     const p = d.profile || {};
     document.getElementById("ieltsExamType").value = p.exam_type || "Academic";
-    document.getElementById("ieltsTargetBand").value = String(p.target_band || 6.5);
     document.getElementById("ieltsExamDate").value = p.planned_exam_date || "";
     document.getElementById("ieltsBandCards").innerHTML = [
       bandCard("Overall", p.current_overall_band), bandCard("Listening", p.listening_band),
@@ -807,12 +806,12 @@ async function loadIELTSDashboard() {
     ].join("");
     document.getElementById("ieltsRecommendation").textContent = d.recommendation || "Complete a practice activity to get a recommendation.";
     const recent = [
-      ...(d.objective_recent || []).map(x => ({name:`${x.section} · ${x.title}`, band:x.estimated_band, date:x.created_at})),
+      ...(d.objective_recent || []).map(x => ({name:`${x.section} · ${x.title}`, band:x.estimated_band, pct:x.score_percent, date:x.created_at})),
       ...(d.writing_recent || []).map(x => ({name:`Writing Task ${x.task_number}`, band:x.estimated_band, date:x.created_at})),
       ...(d.speaking_recent || []).map(x => ({name:`Speaking Part ${x.part}`, band:x.provisional_language_band, date:x.created_at}))
     ].sort((a,b)=>String(b.date).localeCompare(String(a.date))).slice(0,10);
     document.getElementById("ieltsRecent").innerHTML = recent.length
-      ? recent.map(x=>`<div class="py-2 border-bottom d-flex justify-content-between"><span>${esc(x.name)}</span><strong>${x.band == null ? "—" : esc(Number(x.band).toFixed(1))}</strong></div>`).join("")
+      ? recent.map(x=>`<div class="py-2 border-bottom d-flex justify-content-between"><span>${esc(x.name)}</span><strong>${x.band != null ? esc(Number(x.band).toFixed(1)) : (x.pct != null ? `${esc(x.pct)}%` : "—")}</strong></div>`).join("")
       : `<div class="text-secondary">No IELTS practice yet.</div>`;
   } catch(e) {
     document.getElementById("ieltsBandCards").innerHTML = `<div class="text-danger">${esc(e.message)}</div>`;
@@ -822,7 +821,6 @@ async function loadIELTSDashboard() {
 async function saveIELTSProfile() {
   const payload = {
     exam_type: document.getElementById("ieltsExamType").value,
-    target_band: Number(document.getElementById("ieltsTargetBand").value),
     planned_exam_date: document.getElementById("ieltsExamDate").value || null
   };
   try {
@@ -836,8 +834,7 @@ async function generateIELTSWriting() {
   document.getElementById("ieltsWritingResult").innerHTML = "";
   const payload = {
     test_type: document.getElementById("ieltsWritingType").value,
-    task_number: Number(document.getElementById("ieltsWritingTask").value),
-    target_band: Number(document.getElementById("ieltsWritingTarget").value)
+    task_number: Number(document.getElementById("ieltsWritingTask").value)
   };
   try {
     currentIELTSWriting = await api("/api/ielts/writing/generate", {method:"POST", body:JSON.stringify(payload)});
@@ -883,8 +880,7 @@ async function generateIELTSSpeaking() {
   document.getElementById("ieltsSpeakingResult").innerHTML = "";
   try {
     currentIELTSSpeaking = await api("/api/ielts/speaking/generate", {method:"POST", body:JSON.stringify({
-      part: Number(document.getElementById("ieltsSpeakingPart").value),
-      target_band: Number(document.getElementById("ieltsSpeakingTarget").value)
+      part: Number(document.getElementById("ieltsSpeakingPart").value)
     })});
     document.getElementById("ieltsSpeakingPromptBox").classList.remove("d-none");
     document.getElementById("ieltsSpeakingTitle").textContent = currentIELTSSpeaking.title || `Speaking Part ${currentIELTSSpeaking.part}`;
@@ -944,11 +940,12 @@ async function assessIELTSSpeaking() {
 }
 
 function renderIELTSQuestions(containerId, data, section) {
-  const passage = section === "reading" ? `<div class="card-soft mb-3"><h5>${esc(data.title)}</h5><div class="reading-passage">${esc(data.passage).replace(/\n/g,"<br>")}</div></div>` : `<div class="card-soft mb-3"><h5>${esc(data.title)}</h5><p class="text-secondary mb-0">Listen to the audio, then answer all questions. You may replay it during practice.</p></div>`;
+  const passage = section === "reading" ? `<div class="card-soft mb-3"><h5>${esc(data.title)}</h5><div class="reading-passage">${esc(data.passage).replace(/\n/g,"<br>")}</div></div>` : `<div class="card-soft mb-3"><h5>${esc(data.title)}</h5><p class="text-secondary mb-0">Read the questions, then press Play. The recording is played once — answer while you listen.</p><div id="ieltsListenState" class="small text-secondary mt-1"></div></div>`;
   const questions = (data.questions || []).map(q => {
     const opts = (q.options || []).filter(Boolean);
+    const instr = q.instruction ? `<div class="small text-secondary mb-1">${esc(q.instruction)}</div>` : "";
     const input = opts.length ? opts.map((o,i)=>`<div class="form-check"><input class="form-check-input" type="radio" name="${section}q${q.id}" value="${esc(o)}" id="${section}q${q.id}_${i}"><label class="form-check-label" for="${section}q${q.id}_${i}">${esc(o)}</label></div>`).join("") : `<input class="form-control" name="${section}q${q.id}" placeholder="Your answer">`;
-    return `<div class="card-soft my-3"><div class="fw-semibold mb-2">${esc(q.id)}. ${esc(q.question)}</div>${input}</div>`;
+    return `<div class="card-soft my-3">${instr}<div class="fw-semibold mb-2">${esc(q.id)}. ${esc(q.question)}</div>${input}<div id="${section}fb${q.id}" class="mt-2"></div></div>`;
   }).join("");
   document.getElementById(containerId).innerHTML = passage + questions + `<button class="btn btn-primary" onclick="submitIELTSObjective('${section}')">Submit ${section}</button><div id="${section}SubmitResult" class="mt-3"></div>`;
 }
@@ -957,8 +954,7 @@ async function generateIELTSReading() {
   document.getElementById("ieltsReadingContent").innerHTML = `<div class="loader">Generating reading practice…</div>`;
   try {
     currentIELTSReading = await api("/api/ielts/reading/generate", {method:"POST", body:JSON.stringify({
-      test_type:document.getElementById("ieltsReadingType").value,
-      target_band:Number(document.getElementById("ieltsReadingTarget").value)
+      test_type:document.getElementById("ieltsReadingType").value
     })});
     renderIELTSQuestions("ieltsReadingContent", currentIELTSReading, "reading");
   } catch(e) { document.getElementById("ieltsReadingContent").textContent=e.message; }
@@ -967,17 +963,43 @@ async function generateIELTSReading() {
 async function generateIELTSListening() {
   document.getElementById("ieltsListeningContent").innerHTML = `<div class="loader">Generating listening practice…</div>`;
   try {
-    currentIELTSListening = await api("/api/ielts/listening/generate", {method:"POST", body:JSON.stringify({
-      test_type:"Academic", target_band:Number(document.getElementById("ieltsListeningTarget").value)
-    })});
-    document.getElementById("ieltsListenAudioBtn").disabled=false;
+    currentIELTSListening = await api("/api/ielts/listening/generate", {method:"POST", body:JSON.stringify({test_type:"Academic"})});
+    const btn = document.getElementById("ieltsListenAudioBtn");
+    btn.disabled = false;
+    btn.textContent = "▶ Play recording (once)";
     renderIELTSQuestions("ieltsListeningContent", currentIELTSListening, "listening");
   } catch(e) { document.getElementById("ieltsListeningContent").textContent=e.message; }
 }
 
-function playIELTSListening() {
-  if (!currentIELTSListening?.audio_script) return alert("Generate a listening set first.");
-  speakText(currentIELTSListening.audio_script, document.getElementById("ieltsListenAudioBtn"));
+async function playIELTSListening() {
+  if (!currentIELTSListening?.test_id) return alert("Generate a listening set first.");
+  const btn = document.getElementById("ieltsListenAudioBtn");
+  const state = document.getElementById("ieltsListenState");
+  btn.disabled = true;
+  btn.textContent = "Loading recording…";
+  try {
+    const res = await fetch(`/api/ielts/practice/${currentIELTSListening.test_id}/audio`, {
+      headers: {"Authorization": `Bearer ${currentSession.access_token}`}
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      if (res.status !== 403) btn.disabled = false;
+      btn.textContent = res.status === 403 ? "Recording already played" : "▶ Play recording (once)";
+      throw new Error(d.detail || `Could not load the recording (${res.status}).`);
+    }
+    const url = URL.createObjectURL(await res.blob());
+    const audio = new Audio(url);
+    btn.textContent = "Playing…";
+    if (state) state.textContent = "The recording is playing. It will not be repeated.";
+    audio.onended = () => {
+      btn.textContent = "Recording finished";
+      if (state) state.textContent = "Recording finished. Complete your answers and submit.";
+      URL.revokeObjectURL(url);
+    };
+    await audio.play();
+  } catch (e) {
+    if (state) state.textContent = e.message; else alert(e.message);
+  }
 }
 
 async function submitIELTSObjective(section) {
@@ -989,15 +1011,21 @@ async function submitIELTSObjective(section) {
     const text = document.querySelector(`input.form-control[name="${section}q${q.id}"]`);
     answers[String(q.id)] = radio ? radio.value : (text ? text.value : "");
   });
-  const testType = section === "reading" ? document.getElementById("ieltsReadingType").value : "Academic";
   const resultId = `${section}SubmitResult`;
   document.getElementById(resultId).innerHTML = `<div class="loader">Scoring…</div>`;
   try {
     const d = await api("/api/ielts/objective/submit", {method:"POST", body:JSON.stringify({
-      section, test_type:testType, title:data.title || `IELTS ${section}`,
-      questions:data.questions || [], answer_key:data.answer_key || {}, explanations:data.explanations || {}, answers
+      test_id: data.test_id, answers
     })});
-    document.getElementById(resultId).innerHTML = `<div class="alert alert-primary"><strong>${esc(d.correct)}/${esc(d.total)} correct · ${esc(d.score_percent)}%</strong><br>Approximate practice band: <strong>${esc(Number(d.estimated_band).toFixed(1))}</strong><br><small>${esc(d.disclaimer)}</small></div>${(d.details||[]).map(x=>`<div class="small py-1">${x.correct?"✅":"❌"} Q${esc(x.id)} — ${esc(x.explanation||"")}</div>`).join("")}`;
+    for (const x of (d.details || [])) {
+      const fb = document.getElementById(`${section}fb${x.id}`);
+      if (fb) fb.innerHTML = x.correct
+        ? `<div class="small text-success"><strong>Correct.</strong> ${esc(x.explanation || "")}</div>`
+        : `<div class="small text-danger"><strong>Your answer:</strong> ${esc(x.answer || "—")} · <strong>Correct:</strong> ${esc(x.expected)}<br><span class="text-secondary">${esc(x.explanation || "")}</span></div>`;
+    }
+    document.querySelectorAll(`#${section === "reading" ? "ieltsReadingContent" : "ieltsListeningContent"} input`).forEach(el => el.disabled = true);
+    document.getElementById(resultId).innerHTML = `<div class="alert alert-primary"><strong>${esc(d.correct)}/${esc(d.total)} correct · ${esc(d.score_percent)}%</strong><br><small>${esc(d.note)}</small></div>`
+      + (d.transcript ? `<div class="card-soft"><h6>Transcript</h6><div class="small">${esc(d.transcript).replace(/\n/g,"<br>")}</div></div>` : "");
     await loadIELTSDashboard();
   } catch(e) { document.getElementById(resultId).textContent=e.message; }
 }
@@ -1059,18 +1087,17 @@ function startMockTimer(seconds) {
 
 async function startFullIELTSMock() {
   const test_type = document.getElementById("mockTestType").value;
-  const target_band = Number(document.getElementById("mockTargetBand").value);
   document.getElementById("mockSetup").innerHTML += `<div id="mockStartLoader" class="loader mt-3">Creating full mock exam…</div>`;
   try {
     const d = await api("/api/ielts/mock/start", {
       method:"POST",
-      body:JSON.stringify({test_type, target_band})
+      body:JSON.stringify({test_type})
     });
     fullMock = {...d, currentSection:"listening"};
     localStorage.setItem("activeIELTSMockId", d.mock_id);
     document.getElementById("mockSetup").classList.add("d-none");
     document.getElementById("mockExam").classList.remove("d-none");
-    document.getElementById("mockExamLabel").textContent = `${d.test_type} · target ${Number(d.target_band).toFixed(1)}`;
+    document.getElementById("mockExamLabel").textContent = `${d.test_type} · computer-delivered format`;
     setMockProgress("listening");
     startMockTimer(30 * 60);
     await loadMockObjectivePart("listening", 1);
@@ -1092,12 +1119,11 @@ async function resumeFullIELTSMock() {
     fullMock = {
       mock_id:id,
       test_type:d.test_type,
-      target_band:Number(d.metadata?.target_band || 6.5),
       status:d.status
     };
     document.getElementById("mockSetup").classList.add("d-none");
     document.getElementById("mockExam").classList.remove("d-none");
-    document.getElementById("mockExamLabel").textContent = `${d.test_type} · target ${Number(fullMock.target_band).toFixed(1)}`;
+    document.getElementById("mockExamLabel").textContent = `${d.test_type} · computer-delivered format`;
     const completed = d.sections || [];
     const listeningDone = completed.filter(x=>x.section==="listening" && x.status==="completed").length;
     const readingDone = completed.filter(x=>x.section==="reading" && x.status==="completed").length;

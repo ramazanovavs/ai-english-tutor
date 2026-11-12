@@ -211,13 +211,12 @@
 
         <div id="page-ielts-dashboard" class="page d-none">
           <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
-            <div><h2>IELTS Preparation</h2><p class="text-secondary">Track a separate IELTS target alongside your CEFR learning profile.</p></div>
+            <div><h2>IELTS Preparation</h2><p class="text-secondary">Your IELTS practice estimates, kept separate from your CEFR learning profile. All tasks use real exam difficulty.</p></div>
             <span class="badge text-bg-warning">AI practice estimates — not official IELTS scores</span>
           </div>
           <div class="row g-2 mb-4">
-            <div class="col-md-4"><label class="form-label">Test type</label><select id="ieltsExamType" class="form-select"><option>Academic</option><option>General Training</option></select></div>
-            <div class="col-md-3"><label class="form-label">Target band</label><select id="ieltsTargetBand" class="form-select"><option>5.5</option><option>6.0</option><option selected>6.5</option><option>7.0</option><option>7.5</option><option>8.0</option><option>8.5</option><option>9.0</option></select></div>
-            <div class="col-md-3"><label class="form-label">Planned exam</label><input id="ieltsExamDate" type="date" class="form-control"></div>
+            <div class="col-md-5"><label class="form-label">Test type</label><select id="ieltsExamType" class="form-select"><option>Academic</option><option>General Training</option></select></div>
+            <div class="col-md-5"><label class="form-label">Planned exam</label><input id="ieltsExamDate" type="date" class="form-control"></div>
             <div class="col-md-2 d-grid align-self-end"><button class="btn btn-primary" onclick="saveIELTSProfile()">Save</button></div>
           </div>
           <div id="ieltsBandCards" class="row g-3"></div>
@@ -229,10 +228,9 @@
           <h2>IELTS Writing</h2>
           <p class="text-secondary">Generate an original Task 1 or Task 2 prompt and receive criterion-level formative feedback.</p>
           <div class="row g-2 mb-3">
-            <div class="col-md-4"><select id="ieltsWritingType" class="form-select"><option>Academic</option><option>General Training</option></select></div>
-            <div class="col-md-3"><select id="ieltsWritingTask" class="form-select"><option value="1">Task 1</option><option value="2" selected>Task 2</option></select></div>
-            <div class="col-md-3"><select id="ieltsWritingTarget" class="form-select"><option>6.0</option><option selected>6.5</option><option>7.0</option><option>7.5</option><option>8.0</option></select></div>
-            <div class="col-md-2 d-grid"><button class="btn btn-outline-primary" onclick="generateIELTSWriting()">Generate task</button></div>
+            <div class="col-md-5"><select id="ieltsWritingType" class="form-select"><option>Academic</option><option>General Training</option></select></div>
+            <div class="col-md-4"><select id="ieltsWritingTask" class="form-select"><option value="1">Task 1</option><option value="2" selected>Task 2</option></select></div>
+            <div class="col-md-3 d-grid"><button class="btn btn-outline-primary" onclick="generateIELTSWriting()">Generate task</button></div>
           </div>
           <div id="ieltsWritingPromptBox" class="card-soft mb-3 d-none"><h5 id="ieltsWritingTitle"></h5><p id="ieltsWritingPrompt" class="mb-2"></p><div id="ieltsWritingMeta" class="small text-secondary"></div></div>
           <textarea id="ieltsWritingResponse" class="form-control" rows="12" placeholder="Write your IELTS response here..."></textarea>
@@ -244,8 +242,7 @@
           <h2>IELTS Speaking</h2>
           <p class="text-secondary">Practice Parts 1–3. The AI can score transcript-observable language criteria; pronunciation remains unscored in this version.</p>
           <div class="row g-2 mb-3">
-            <div class="col-md-4"><select id="ieltsSpeakingPart" class="form-select"><option value="1">Part 1</option><option value="2">Part 2</option><option value="3">Part 3</option></select></div>
-            <div class="col-md-4"><select id="ieltsSpeakingTarget" class="form-select"><option>6.0</option><option selected>6.5</option><option>7.0</option><option>7.5</option><option>8.0</option></select></div>
+            <div class="col-md-8"><select id="ieltsSpeakingPart" class="form-select"><option value="1">Part 1</option><option value="2">Part 2</option><option value="3">Part 3</option></select></div>
             <div class="col-md-4 d-grid"><button class="btn btn-outline-primary" onclick="generateIELTSSpeaking()">Generate questions</button></div>
           </div>
           <div id="ieltsSpeakingPromptBox" class="card-soft mb-3 d-none"><h5 id="ieltsSpeakingTitle"></h5><div id="ieltsSpeakingQuestions"></div></div>
@@ -256,15 +253,15 @@
 
         <div id="page-ielts-reading" class="page d-none">
           <h2>IELTS Reading Practice</h2>
-          <p class="text-secondary">Original AI-generated practice. Short sets provide an approximate practice band only.</p>
-          <div class="row g-2 mb-3"><div class="col-md-5"><select id="ieltsReadingType" class="form-select"><option>Academic</option><option>General Training</option></select></div><div class="col-md-3"><select id="ieltsReadingTarget" class="form-select"><option>6.0</option><option selected>6.5</option><option>7.0</option><option>7.5</option></select></div><div class="col-md-4 d-grid"><button class="btn btn-primary" onclick="generateIELTSReading()">Generate reading set</button></div></div>
+          <p class="text-secondary">One exam-level passage with 10 questions. Short sets give a percentage and a full review; a band is given only in the full 40-question test (IELTS Mock).</p>
+          <div class="row g-2 mb-3"><div class="col-md-8"><select id="ieltsReadingType" class="form-select"><option>Academic</option><option>General Training</option></select></div><div class="col-md-4 d-grid"><button class="btn btn-primary" onclick="generateIELTSReading()">Generate reading set</button></div></div>
           <div id="ieltsReadingContent"></div>
         </div>
 
         <div id="page-ielts-listening" class="page d-none">
           <h2>IELTS Listening Practice</h2>
-          <p class="text-secondary">Generate an original audio-style practice set, listen with AI TTS, then answer the questions.</p>
-          <div class="row g-2 mb-3"><div class="col-md-4"><select id="ieltsListeningTarget" class="form-select"><option>6.0</option><option selected>6.5</option><option>7.0</option><option>7.5</option></select></div><div class="col-md-4 d-grid"><button class="btn btn-primary" onclick="generateIELTSListening()">Generate listening set</button></div><div class="col-md-4 d-grid"><button id="ieltsListenAudioBtn" class="btn btn-outline-primary" onclick="playIELTSListening()" disabled>🔊 Play audio</button></div></div>
+          <p class="text-secondary">Exam conditions: read the questions first — the recording is played <strong>once</strong>. Short sets give a percentage and a review with the transcript; a band is given only in the full test (IELTS Mock).</p>
+          <div class="row g-2 mb-3"><div class="col-md-6 d-grid"><button class="btn btn-primary" onclick="generateIELTSListening()">Generate listening set</button></div><div class="col-md-6 d-grid"><button id="ieltsListenAudioBtn" class="btn btn-outline-primary" onclick="playIELTSListening()" disabled>▶ Play recording (once)</button></div></div>
           <div id="ieltsListeningContent"></div>
         </div>
 
@@ -281,21 +278,14 @@
     <h5>Start a new full mock</h5>
     <p class="text-secondary">Listening has 4 parts / 40 questions; Reading has 3 sections / 40 questions; Writing has 2 tasks; Speaking has 3 parts.</p>
     <div class="row g-2">
-      <div class="col-md-5">
+      <div class="col-md-8">
         <label class="form-label">Test type</label>
         <select id="mockTestType" class="form-select">
           <option>Academic</option>
           <option>General Training</option>
         </select>
       </div>
-      <div class="col-md-4">
-        <label class="form-label">Target band</label>
-        <select id="mockTargetBand" class="form-select">
-          <option>5.5</option><option>6.0</option><option selected>6.5</option>
-          <option>7.0</option><option>7.5</option><option>8.0</option><option>8.5</option><option>9.0</option>
-        </select>
-      </div>
-      <div class="col-md-3 d-grid align-self-end">
+      <div class="col-md-4 d-grid align-self-end">
         <button class="btn btn-primary" onclick="startFullIELTSMock()">Start full mock</button>
       </div>
     </div>

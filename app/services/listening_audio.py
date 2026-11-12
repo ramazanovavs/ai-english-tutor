@@ -150,7 +150,7 @@ def _worker(test_id: str, builder, on_ready) -> None:
 
 
 def start(test_id: str, user_id: str, test: dict | None = None, *,
-          builder=None, audio: bytes | None = None, on_ready=None) -> None:
+          builder=None, audio: bytes | None = None, on_ready=None, max_plays: int = MAX_PLAYS) -> None:
     """
     Begin preparing audio in the background as soon as the test exists.
     builder: callable returning MP3 bytes (default: TTS from the test script);
@@ -164,6 +164,7 @@ def start(test_id: str, user_id: str, test: dict | None = None, *,
             "error": None,
             "ready": threading.Event(),
             "plays": 0,
+            "max_plays": max_plays,
             "checked": False,
             "created": time.time(),
             "expires": time.time() + TTL_UNSUBMITTED,
@@ -176,7 +177,8 @@ def start(test_id: str, user_id: str, test: dict | None = None, *,
     threading.Thread(target=_worker, args=(test_id, builder, on_ready), daemon=True).start()
 
 
-def get_for_play(test_id: str, user_id: str, test_loader, audio_loader=None) -> tuple[bytes, int | None]:
+def get_for_play(test_id: str, user_id: str, test_loader, audio_loader=None,
+                 max_plays: int = MAX_PLAYS) -> tuple[bytes, int | None]:
     """
     Return (mp3, plays_left). plays_left is None after the answers were checked.
     Raises PermissionError when the play limit is reached, LookupError if unknown.
@@ -189,15 +191,19 @@ def get_for_play(test_id: str, user_id: str, test_loader, audio_loader=None) -> 
         test = test_loader()
         if not test:
             raise LookupError("Listening practice not found.")
-        start(test_id, user_id, test, builder=audio_loader(test) if audio_loader else None)
+        start(test_id, user_id, test, builder=audio_loader(test) if audio_loader else None,
+              max_plays=max_plays)
         with _lock:
             entry = _cache[test_id]
     if entry["user_id"] != user_id:
         raise LookupError("Listening practice not found.")
 
+    limit = entry.get("max_plays", MAX_PLAYS)
+    used_up = (f"The recording can be played only once, as in the exam." if limit == 1
+               else f"You have used all {limit} plays. Answer the questions and check them.")
     with _lock:
-        if not entry["checked"] and entry["plays"] >= MAX_PLAYS:
-            raise PermissionError(f"You have used all {MAX_PLAYS} plays. Answer the questions and check them.")
+        if not entry["checked"] and entry["plays"] >= limit:
+            raise PermissionError(used_up)
 
     if not entry["ready"].wait(timeout=120):
         raise TimeoutError("The audio is still being prepared. Please try again in a moment.")
@@ -209,10 +215,10 @@ def get_for_play(test_id: str, user_id: str, test_loader, audio_loader=None) -> 
     with _lock:
         if entry["checked"]:
             return entry["audio"], None
-        if entry["plays"] >= MAX_PLAYS:
-            raise PermissionError(f"You have used all {MAX_PLAYS} plays. Answer the questions and check them.")
+        if entry["plays"] >= limit:
+            raise PermissionError(used_up)
         entry["plays"] += 1
-        return entry["audio"], MAX_PLAYS - entry["plays"]
+        return entry["audio"], limit - entry["plays"]
 
 
 def plays_used(test_id: str) -> int:

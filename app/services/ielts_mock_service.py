@@ -6,14 +6,13 @@ from typing import Any
 from app.services.supabase_service import admin_db
 
 
-def start_mock(user_id: str, test_type: str, target_band: float) -> dict:
+def start_mock(user_id: str, test_type: str) -> dict:
     db = admin_db()
     row = db.table("ielts_mock_tests").insert({
         "user_id": user_id,
         "test_type": test_type,
         "status": "in_progress",
         "metadata": {
-            "target_band": target_band,
             "current_section": "listening",
             "version": "full_mock_v1",
         },

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.services.supabase_service import admin_db
+from app.services.ielts_scoring import overall_band, half_band_nearest
 
 
 def ensure_ielts_profile(user_id: str) -> dict:
@@ -16,10 +17,10 @@ def ensure_ielts_profile(user_id: str) -> dict:
 
 
 def update_ielts_profile(user_id: str, values: dict[str, Any]) -> dict:
-    allowed = {"exam_type", "target_band", "planned_exam_date"}
+    allowed = {"exam_type", "planned_exam_date"}
     payload = {k: v for k, v in values.items() if k in allowed}
     payload["updated_at"] = datetime.now(timezone.utc).isoformat()
-    result = db = admin_db()
+    db = admin_db()
     db.table("ielts_profiles").update(payload).eq("user_id", user_id).execute()
     return ensure_ielts_profile(user_id)
 
@@ -87,12 +88,17 @@ def get_ielts_dashboard(user_id: str) -> dict:
         "speaking": profile.get("speaking_band"),
     }
     measured = {k: float(v) for k, v in bands.items() if v is not None}
+    missing = [k for k in bands if k not in measured]
     if not measured:
-        recommendation = "Start with one practice activity in each IELTS section to build your baseline."
+        recommendation = "Start with a full mock exam or one practice activity in each IELTS section to build your baseline."
+    elif missing:
+        recommendation = f"No estimate yet for {', '.join(m.title() for m in missing)}. Practise it next to complete your profile."
     else:
         weakest = min(measured, key=measured.get)
-        gap = max(0.0, float(profile.get("target_band") or 6.5) - measured[weakest])
-        recommendation = f"Focus next on {weakest.title()}: current practice estimate {measured[weakest]:.1f}, target {float(profile.get('target_band') or 6.5):.1f} (gap {gap:.1f})."
+        recommendation = (
+            f"Focus next on {weakest.title()}: current practice estimate {measured[weakest]:.1f} "
+            f"— the lowest of your four sections."
+        )
     return {
         "profile": profile,
         "writing_recent": writing.data or [],
@@ -116,7 +122,7 @@ def _refresh_section_band(user_id: str, section: str) -> None:
         vals = [float(x["estimated_band"]) for x in (r.data or []) if x.get("estimated_band") is not None]
     if not vals:
         return
-    band = round((sum(vals) / len(vals)) * 2) / 2
+    band = half_band_nearest(sum(vals) / len(vals))
     field = f"{section}_band"
     if field in {"listening_band", "reading_band", "writing_band", "speaking_band"}:
         db.table("ielts_profiles").update({field: band, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("user_id", user_id).execute()
@@ -136,7 +142,5 @@ def _refresh_overall(user_id: str) -> None:
     vals = [float(v) for v in vals if v is not None]
     if len(vals) < 4:
         return
-    avg = sum(vals) / 4
-    # IELTS overall-band rounding: .25 -> .5 and .75 -> next whole band; otherwise nearest half.
-    overall = round(avg * 2) / 2
+    overall = overall_band(vals)  # .25 -> .5 and .75 -> next whole band
     db.table("ielts_profiles").update({"current_overall_band": overall}).eq("user_id", user_id).execute()
