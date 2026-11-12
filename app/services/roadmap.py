@@ -30,12 +30,12 @@ def load(user_id: str) -> dict:
     rows = admin_db().table(TABLE).select("*").eq("user_id", user_id).limit(1).execute().data or []
     if rows:
         row = rows[0]
-        for key in ("levels", "items", "placement"):
+        for key in ("levels", "items", "placement", "goals", "checks"):
             row[key] = row.get(key) or {}
         return row
     row = {"user_id": user_id, "levels": {}, "items": {}, "placement": {}}
     admin_db().table(TABLE).upsert(row, on_conflict="user_id").execute()
-    return row
+    return {**row, "goals": {}, "checks": {}}
 
 
 def save(user_id: str, **fields) -> None:
@@ -50,13 +50,13 @@ def overall(levels: dict) -> str | None:
     return rm.SUBLEVELS[median_low(idx)]
 
 
-def apply_placement_items(items: dict, levels: dict) -> dict:
-    """Everything below the placed sublevel of a skill counts as shown by the placement test."""
+def apply_placement_items(items: dict, levels: dict, source: str = "placement") -> dict:
+    """Everything below the placed sublevel of a skill counts as shown by the placement test (or a level check)."""
     items = dict(items)
     for it in rm.ITEMS:
         placed = rm.sub_index(levels.get(it["skill"]))
         if placed > rm.sub_index(it["sub"]) and (items.get(it["id"]) or {}).get("status") != "confirmed":
-            items[it["id"]] = {"status": "confirmed", "source": "placement", "at": now_iso()}
+            items[it["id"]] = {"status": "confirmed", "source": source, "at": now_iso()}
     return items
 
 

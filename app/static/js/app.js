@@ -3026,7 +3026,9 @@ async function loadRoadmap() {
   try {
     const [p, r] = await Promise.all([api("/api/placement"), api("/api/roadmap")]);
     placementState = p;
+    if (roadmapData?.current !== r.current) roadmapSelected = null;   // after a level change show the new level
     roadmapData = r;
+    [checkState, progressData] = await Promise.all([api("/api/level-check").catch(() => null), api("/api/progress/overview").catch(() => null)]);
     applyUiLang();
     renderRoadmapPage();
   } catch (e) {
@@ -3037,6 +3039,7 @@ async function loadRoadmap() {
 function renderRoadmapPage() {
   const p = placementState || {};
   if (p.status === "in_progress") return renderPlacement();
+  if (checkState?.active && ["preparing", "ready", "writing", "assessing"].includes(checkState.active.status)) return renderLevelCheck();
   if (roadmapData?.current) return renderRoadmapMap();
   return renderPlacementIntro();
 }
@@ -3300,6 +3303,7 @@ function renderRoadmapMap() {
         <div class="progress mt-1" style="height:8px"><div class="progress-bar" style="width:${pr.percent}%"></div></div></div></div>
       <div class="col-lg-4">${ielts}</div></div>
     <div class="row g-2 mb-3">${skillsRow}</div>
+    <div class="row g-3 mb-3"><div class="col-lg-6">${levelCheckCardHTML()}</div><div class="col-lg-6">${goalCardHTML()}</div></div>
     ${placementResultsHTML()}
     <div class="card-soft"><h5>${esc(T("map_title"))}</h5><div class="small text-secondary mb-2">${esc(T("map_hint"))}</div>
       <div class="rm-ladder mb-3">${ladder}</div>
@@ -3389,7 +3393,10 @@ let todayData = null, reviewTab = "words", reviewWords = null, reviewIndex = 0, 
 let mistakesData = null, mistakesPractice = null, mistakesResult = null;
 
 async function loadToday() {
-  try { todayData = await api("/api/today"); renderToday(); }
+  try {
+    [todayData, progressData] = await Promise.all([api("/api/today"), api("/api/progress/overview").catch(() => progressData)]);
+    renderToday();
+  }
   catch (e) { const box = document.getElementById("todayCard"); if (box) box.innerHTML = ""; }
 }
 
@@ -3407,7 +3414,7 @@ function renderToday() {
       ${t.done && t.kind !== "skill" ? "" : `<button class="btn btn-sm ${t.done ? "btn-outline-secondary" : "btn-primary"}" onclick="${action}">${esc(T("go"))}</button>`}</div>`;
   }).join("");
   box.innerHTML = `<div class="card-soft"><div class="d-flex justify-content-between align-items-center">
-      <h5 class="mb-1">📅 ${esc(T("today"))}</h5><span class="small text-secondary">${esc(T("today_done", {d: todayData.done, t: todayData.total}))}</span></div>
+      <h5 class="mb-1">📅 ${esc(T("today"))}</h5><span class="small text-secondary">${streakBadgeHTML()} ${esc(T("today_done", {d: todayData.done, t: todayData.total}))}</span></div>
     ${rows || `<div class="text-secondary">${esc(T("today_empty"))}</div>`}</div>`;
 }
 
@@ -3508,5 +3515,162 @@ async function submitMistakes() {
     mistakesData = await api("/api/mistakes");
     renderReview();
     loadToday();
+  } catch (e) { rmToast(e.message); }
+}
+
+// ========================= Streak, goals and the level check =========================
+let checkState = null, progressData = null, checkTimer = null;
+Object.assign(RM_T, {
+  streak: {ru: "🔥 Серия: {n} дн.", kk: "🔥 Қатарынан: {n} күн", en: "🔥 Streak: {n} days"},
+  streak_best: {ru: "рекорд {n}", kk: "рекорд {n}", en: "best {n}"},
+  check_title: {ru: "Контрольный тест на {t}", kk: "{t} деңгейіне бақылау тесті", en: "Level check for {t}"},
+  check_locked: {ru: "Откроется, когда подтверждено {u}% умений уровня {c} (сейчас {p}%).", kk: "{c} деңгейі дағдыларының {u}%-ы расталғанда ашылады (қазір {p}%).", en: "Unlocks when {u}% of {c} skills are confirmed (now {p}%)."},
+  check_ready: {ru: "Можно сдавать: 15 вопросов (грамматика, лексика, чтение) и короткий текст. ~20 минут. Для перехода нужно 75% и письмо не ниже уровня на одну ступень.", kk: "Тапсыруға болады: 15 сұрақ (грамматика, лексика, оқылым) және қысқа мәтін. ~20 минут. Өту үшін 75% және жазылым бір сатыдан төмен болмауы керек.", en: "Ready: 15 questions (grammar, vocabulary, reading) and a short text, ~20 minutes. To pass you need 75% and writing no more than one step below."},
+  check_start: {ru: "Сдать контрольный тест", kk: "Бақылау тестін тапсыру", en: "Take the level check"},
+  check_retry: {ru: "Повторная попытка будет доступна {d}.", kk: "Қайта тапсыру {d} мүмкін болады.", en: "You can try again {d}."},
+  check_top: {ru: "Вы на вершине шкалы — C2.", kk: "Сіз шкаланың шыңындасыз — C2.", en: "You are at the top of the scale — C2."},
+  check_preparing: {ru: "Составляем контрольный тест и проверяем ключи — до минуты…", kk: "Бақылау тестін құрастырып, кілттерін тексеріп жатырмыз — бір минутқа дейін…", en: "Building the level check and checking the answer keys — up to a minute…"},
+  check_failed_prep: {ru: "Не удалось составить тест (сервис ИИ занят). Попробуйте ещё раз.", kk: "Тест құрастырылмады (ЖИ сервисі бос емес). Қайталап көріңіз.", en: "Could not build the test (the AI service is busy). Please try again."},
+  check_writing: {ru: "Последняя часть — письмо. Объём 100–250 слов в зависимости от уровня.", kk: "Соңғы бөлім — жазылым. Деңгейге қарай 100–250 сөз.", en: "Last part — writing, 100–250 words depending on the level."},
+  check_objective: {ru: "Тестовая часть: {p}%", kk: "Тест бөлімі: {p}%", en: "Test part: {p}%"},
+  check_assessing: {ru: "Проверяем письмо…", kk: "Жазылымды тексеріп жатырмыз…", en: "Checking your writing…"},
+  check_passed: {ru: "🎉 Тест сдан! Ваш новый уровень — {t}.", kk: "🎉 Тест тапсырылды! Жаңа деңгейіңіз — {t}.", en: "🎉 Passed! Your new level is {t}."},
+  check_failed: {ru: "Пока не хватило до {t}. Подтяните слабые места и попробуйте снова через сутки.", kk: "{t} деңгейіне әзірге жетпеді. Әлсіз тұстарды жақсартып, бір тәуліктен кейін қайталаңыз.", en: "Not yet {t}. Work on the weak areas and try again in 24 hours."},
+  check_weak: {ru: "Слабые места", kk: "Әлсіз тұстар", en: "Weak areas"},
+  check_writing_level: {ru: "Письмо: {s}", kk: "Жазылым: {s}", en: "Writing: {s}"},
+  goal_title: {ru: "Моя цель", kk: "Менің мақсатым", en: "My goal"},
+  goal_target: {ru: "Уровень", kk: "Деңгей", en: "Level"},
+  goal_date: {ru: "К дате", kk: "Мерзімі", en: "By"},
+  goal_days: {ru: "Дней в неделю", kk: "Аптасына күн", en: "Days a week"},
+  save: {ru: "Сохранить", kk: "Сақтау", en: "Save"},
+  goal_eta: {ru: "При {d} дн./нед. по ~30 мин: примерно {h} ч, ориентировочно к {e}.", kk: "Аптасына {d} күн ~30 минуттан: шамамен {h} сағ, болжам бойынша {e}.", en: "At {d} days/week × ~30 min: about {h} h, roughly by {e}."},
+  goal_on_track: {ru: "✅ Успеваете к намеченной дате.", kk: "✅ Белгіленген мерзімге үлгересіз.", en: "✅ On track for your date."},
+  goal_behind: {ru: "⚠️ К этой дате нужно заниматься ~{n} дн. в неделю.", kk: "⚠️ Бұл мерзімге аптасына ~{n} күн оқу қажет.", en: "⚠️ For this date you need ~{n} days a week."},
+  goal_unrealistic: {ru: "⚠️ К этой дате не успеть даже при ежедневных занятиях по 30 минут — сдвиньте дату или занимайтесь дольше.", kk: "⚠️ Күн сайын 30 минуттан оқысаңыз да бұл мерзімге үлгермейсіз — мерзімді ауыстырыңыз немесе ұзағырақ оқыңыз.", en: "⚠️ Not reachable by this date even with 30 minutes daily — move the date or study longer."},
+  goal_actual: {ru: "За последние 4 недели вы занимались в среднем {n} дн. в неделю.", kk: "Соңғы 4 аптада орташа есеппен аптасына {n} күн оқыдыңыз.", en: "Over the last 4 weeks you studied {n} days a week on average."},
+  goal_note: {ru: "Оценка по ориентировочным часам Cambridge для уровней CEFR.", kk: "Бағалау CEFR деңгейлеріне арналған Cambridge-дің шамамен берілген сағаттары бойынша.", en: "Estimate based on Cambridge's approximate guided learning hours for CEFR levels."},
+});
+
+function streakBadgeHTML() {
+  const st = progressData?.streak;
+  if (!st) return "";
+  return `<span class="badge ${st.current ? "text-bg-warning" : "text-bg-light"} me-2" title="${esc(T("streak_best", {n: st.best}))}">${esc(T("streak", {n: st.current}))}</span>`;
+}
+
+function fmtDate(iso) {
+  try { return new Date(iso).toLocaleDateString(uiLang() === "kk" ? "kk-KZ" : uiLang() === "en" ? "en-GB" : "ru-RU", {day: "numeric", month: "long", year: "numeric"}); }
+  catch (e) { return iso; }
+}
+
+function levelCheckCardHTML() {
+  const c = checkState;
+  if (!c) return "";
+  let body;
+  if (c.reason === "top") body = `<p class="mb-0">${esc(T("check_top"))}</p>`;
+  else if (c.reason === "no_level") return "";
+  else {
+    const fin = c.finished?.result;
+    const last = fin ? `<div class="alert ${fin.passed ? "alert-success" : "alert-warning"} py-2 small">
+        ${esc(fin.passed ? T("check_passed", {t: fin.target}) : T("check_failed", {t: fin.target}))}
+        <div>${esc(T("check_objective", {p: fin.objective.percent}))}${fin.writing_sub ? " · " + esc(T("check_writing_level", {s: fin.writing_sub})) : ""}</div>
+        ${fin.weak?.length ? `<div>${esc(T("check_weak"))}: ${fin.weak.map(w => esc(rmText(roadmapData.skill_names[w]))).join(", ")}</div>` : ""}
+        ${fin.writing_feedback?.comment ? `<div class="text-secondary">${esc(fin.writing_feedback.comment)}</div>` : ""}</div>` : "";
+    const err = c.active?.status === "error" ? `<div class="alert alert-warning py-2 small">${esc(T("check_failed_prep"))}</div>` : "";
+    body = `${last}${err}<div class="progress mb-2" style="height:6px"><div class="progress-bar ${c.percent >= c.unlock_percent ? "bg-success" : ""}" style="width:${Math.min(100, c.percent)}%"></div></div>
+      ${c.available ? `<p class="small">${esc(T("check_ready"))}</p><button class="btn btn-primary" onclick="startLevelCheck()">${esc(T("check_start"))}</button>`
+        : c.retry_at ? `<p class="small mb-0">${esc(T("check_retry", {d: fmtDate(c.retry_at)}))}</p>`
+        : `<p class="small mb-0">${esc(T("check_locked", {u: c.unlock_percent, c: c.current, p: c.percent}))}</p>`}`;
+  }
+  return `<div class="card-soft h-100"><h5>🏁 ${esc(T("check_title", {t: c.target || ""}))}</h5>${body}</div>`;
+}
+
+function goalCardHTML() {
+  const g = progressData?.goal || {};
+  const f = progressData?.forecast;
+  const cur = roadmapData?.current;
+  const options = roadmapData.sublevels.filter(x => roadmapData.sublevels.indexOf(x) > roadmapData.sublevels.indexOf(cur))
+    .map(x => `<option ${g.target === x ? "selected" : ""}>${x}</option>`).join("");
+  let fc = "";
+  if (f) {
+    fc = `<div class="small mt-2">${esc(T("goal_eta", {d: f.days_per_week_used, h: f.hours, e: fmtDate(f.eta)}))}</div>`;
+    if (f.target_date) fc += `<div class="small">${esc(f.on_track ? T("goal_on_track") : f.realistic ? T("goal_behind", {n: Math.ceil(f.needed_days_per_week)}) : T("goal_unrealistic"))}</div>`;
+    fc += `<div class="small text-secondary">${esc(T("goal_actual", {n: f.actual_days_per_week}))} ${esc(T("goal_note"))}</div>`;
+  }
+  return `<div class="card-soft h-100"><div class="d-flex justify-content-between"><h5>🎯 ${esc(T("goal_title"))}</h5>${streakBadgeHTML()}</div>
+    ${options ? `<div class="row g-2 align-items-end">
+      <div class="col-4"><label class="form-label small mb-0">${esc(T("goal_target"))}</label><select id="goalTarget" class="form-select form-select-sm"><option value=""></option>${options}</select></div>
+      <div class="col-4"><label class="form-label small mb-0">${esc(T("goal_date"))}</label><input id="goalDate" type="date" class="form-control form-control-sm" value="${esc(g.target_date || "")}"></div>
+      <div class="col-2"><label class="form-label small mb-0">${esc(T("goal_days"))}</label><select id="goalDays" class="form-select form-select-sm">${[1, 2, 3, 4, 5, 6, 7].map(n => `<option ${Number(g.days_per_week || 4) === n ? "selected" : ""}>${n}</option>`).join("")}</select></div>
+      <div class="col-2 d-grid"><button class="btn btn-sm btn-primary" onclick="saveGoal()">${esc(T("save"))}</button></div></div>${fc}`
+      : `<p class="mb-0">${esc(T("check_top"))}</p>`}</div>`;
+}
+
+async function saveGoal() {
+  try {
+    progressData = await api("/api/goals", {method: "POST", body: JSON.stringify({
+      target: document.getElementById("goalTarget").value || null,
+      target_date: document.getElementById("goalDate").value || null,
+      days_per_week: Number(document.getElementById("goalDays").value)})});
+    renderRoadmapMap();
+  } catch (e) { rmToast(e.message); }
+}
+
+async function startLevelCheck() {
+  try { checkState = await api("/api/level-check/start", {method: "POST", body: "{}"}); renderLevelCheck(); }
+  catch (e) { rmToast(e.message); }
+}
+
+function pollLevelCheck(ms = 2500) {
+  clearTimeout(checkTimer);
+  checkTimer = setTimeout(async () => {
+    if (document.getElementById("page-roadmap").classList.contains("d-none")) return;
+    try { checkState = await api("/api/level-check"); } catch (e) { return pollLevelCheck(5000); }
+    if (checkState.active && ["preparing", "assessing"].includes(checkState.active.status)) return renderLevelCheck();
+    loadProfile();
+    loadRoadmap();
+  }, ms);
+}
+
+function renderLevelCheck() {
+  const a = checkState?.active;
+  if (!a || !["preparing", "ready", "writing", "assessing"].includes(a.status)) { loadProfile(); return loadRoadmap(); }
+  const root = document.getElementById("roadmapRoot");
+  const head = `<h2>🏁 ${esc(T("check_title", {t: a.target}))}</h2>`;
+  if (a.status === "preparing") { root.innerHTML = head + `<div class="loader">${esc(T("check_preparing"))}</div>`; return pollLevelCheck(); }
+  if (a.status === "assessing") { root.innerHTML = head + `<div class="loader">${esc(T("check_assessing"))}</div>`; return pollLevelCheck(3000); }
+  if (a.status === "ready") {
+    const c = a.content;
+    const q = x => `<div class="card-soft my-2"><div class="fw-semibold mb-2">${esc(x.id)}. ${esc(x.question)}</div>
+      ${x.options.map((o, i) => `<div class="form-check"><input class="form-check-input" type="radio" name="lc${x.id}" id="lc${x.id}_${i}" value="${esc(o)}">
+        <label class="form-check-label" for="lc${x.id}_${i}">${esc(o)}</label></div>`).join("")}</div>`;
+    const reading = c.questions.filter(x => x.skill === "reading");
+    root.innerHTML = head + c.questions.filter(x => x.skill !== "reading").map(q).join("") +
+      (reading.length ? `<div class="card-soft my-3"><h5>${esc(c.passage_title || "")}</h5><div class="reading-passage">${esc(c.passage || "").replace(/\n/g, "<br>")}</div></div>${reading.map(q).join("")}` : "") +
+      `<button class="btn btn-primary" onclick="submitLevelCheckAnswers()">${esc(T("next"))}</button>`;
+    return;
+  }
+  if (a.status === "writing") {
+    root.innerHTML = head + `<div class="card-soft"><div class="small text-secondary mb-2">${esc(T("check_objective", {p: a.writing.objective_percent}))}</div>
+      <p class="small">${esc(T("check_writing"))}</p><p class="fw-semibold">${esc(a.writing.prompt)}</p>
+      <textarea id="lcWriting" class="form-control" rows="10" oninput="document.getElementById('lcWords').textContent=(this.value.trim().split(/\\s+/).filter(Boolean).length)+' ${esc(T("words"))}'"></textarea>
+      <div class="d-flex justify-content-between mt-2"><span id="lcWords" class="small text-secondary">0 ${esc(T("words"))}</span>
+      <button class="btn btn-primary" onclick="submitLevelCheckWriting()">${esc(T("submit"))}</button></div></div>`;
+  }
+}
+
+async function submitLevelCheckAnswers() {
+  const answers = {};
+  checkState.active.content.questions.forEach(x => {
+    const el = document.querySelector(`input[name="lc${x.id}"]:checked`);
+    if (el) answers[String(x.id)] = el.value;
+  });
+  try { checkState = await api("/api/level-check/answers", {method: "POST", body: JSON.stringify({answers})}); renderLevelCheck(); }
+  catch (e) { rmToast(e.message); }
+}
+
+async function submitLevelCheckWriting() {
+  try {
+    checkState = await api("/api/level-check/writing", {method: "POST", body: JSON.stringify({text: document.getElementById("lcWriting").value})});
+    renderLevelCheck();
   } catch (e) { rmToast(e.message); }
 }

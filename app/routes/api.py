@@ -20,7 +20,7 @@ from app.agents.grammar_agent import analyze as grammar_analyze
 from app.agents.writing_agent import analyze as writing_analyze
 from app.agents.vocabulary_agent import create_set, create_practice
 from app.agents import listening_agent
-from app.services import listening_audio, listening_bank, ielts_analytics, placement, roadmap as roadmap_store, review
+from app.services import listening_audio, listening_bank, ielts_analytics, placement, roadmap as roadmap_store, review, progress
 from app.config import get_settings
 from app.agents.assessment_agent import generate as generate_test
 from app.services.openai_service import ask_text, ask_json, transcribe_audio, synthesize_speech
@@ -2384,3 +2384,61 @@ def mistakes_submit(payload: MistakesSubmitPayload, user=Depends(require_user)):
         return review.submit_mistakes(user["id"], payload.test_id, payload.answers)
     except KeyError:
         raise HTTPException(status_code=404, detail="Practice not found.")
+
+
+# ========================= GOALS, STREAK AND LEVEL CHECK =========================
+
+class GoalPayload(BaseModel):
+    target: str | None = Field(default=None, max_length=5)
+    target_date: str | None = Field(default=None, max_length=10)
+    days_per_week: int | None = Field(default=None, ge=1, le=7)
+
+
+class CheckAnswersPayload(BaseModel):
+    answers: dict[str, str] = Field(default_factory=dict)
+
+
+class CheckWritingPayload(BaseModel):
+    text: str = Field(max_length=8000)
+
+
+def _progress_call(fn, *args):
+    try:
+        return fn(*args)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Progress call failed")
+        raise HTTPException(status_code=503, detail=ROADMAP_SETUP if ("goals" in str(exc) or "checks" in str(exc)
+                                                                      or "learner_roadmap" in str(exc)) else str(exc))
+
+
+@router.get("/progress/overview")
+def progress_overview(user=Depends(require_user)):
+    return _progress_call(progress.overview, user["id"])
+
+
+@router.post("/goals")
+def goals_set(payload: GoalPayload, user=Depends(require_user)):
+    _progress_call(progress.set_goal, user["id"], payload.target, payload.target_date, payload.days_per_week)
+    return progress.overview(user["id"])
+
+
+@router.get("/level-check")
+def level_check_status(user=Depends(require_user)):
+    return _progress_call(progress.check_status, user["id"])
+
+
+@router.post("/level-check/start")
+def level_check_start(user=Depends(require_user)):
+    return _progress_call(progress.start_check, user["id"])
+
+
+@router.post("/level-check/answers")
+def level_check_answers(payload: CheckAnswersPayload, user=Depends(require_user)):
+    return _progress_call(progress.submit_check_answers, user["id"], payload.answers)
+
+
+@router.post("/level-check/writing")
+def level_check_writing(payload: CheckWritingPayload, user=Depends(require_user)):
+    return _progress_call(progress.submit_check_writing, user["id"], payload.text)
