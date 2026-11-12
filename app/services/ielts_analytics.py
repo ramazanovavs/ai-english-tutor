@@ -5,7 +5,7 @@ IELTS learning analytics: accuracy by question type, band history and a forecast
 from __future__ import annotations
 
 import statistics
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.services.supabase_service import admin_db
 from app.services.ielts_scoring import overall_band, half_band_nearest
@@ -115,4 +115,4 @@ def analytics(user_id: str) -> dict:
     hist = history(user_id)
     weak = [s for s in stats if s["total"] >= 3 and s["percent"] < 70][:3]
     return {"by_type": stats, "weakest": weak, "history": hist, "forecast": forecast(hist),
-            "generated_at": datetime.utcnow().isoformat()}
+            "generated_at": datetime.now(timezone.utc).isoformat()}
