@@ -3,7 +3,7 @@ import logging
 import re
 
 from typing import Literal
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
@@ -25,7 +25,7 @@ from app.config import get_settings
 from app.agents.assessment_agent import generate as generate_test
 from app.services.openai_service import ask_text, ask_json, transcribe_audio, synthesize_speech
 from app.services.ielts_scoring import overall_band as ielts_overall_band, writing_band as ielts_writing_band
-from app.services import ielts_exam, ielts_speaking, ielts_pronunciation
+from app.services import ielts_exam, ielts_speaking, ielts_pronunciation, ielts_bank
 from app.services.ielts_scoring import criteria_band as ielts_criteria_band
 import threading
 from app.agents.ielts_agent import (
@@ -1042,17 +1042,60 @@ def ielts_profile(payload: IELTSProfilePayload, user=Depends(require_user)):
     return update_ielts_profile(user["id"], payload.model_dump())
 
 
+AI_DOWN = "The AI service is unavailable right now."
+
+
+def _practice_writing_key(test_type: str, task: int) -> str:
+    kind = "General Training" if test_type.lower().startswith("general") else "Academic"
+    return f"writing:{kind}:1" if task == 1 else "writing:2"
+
+
+def _bank_save_quietly(kind: str, key: str, title: str, content: dict, audio: dict | None = None, source_id=None):
+    try:
+        return ielts_bank.save(kind, key, title, content, audio, source_id)
+    except Exception:
+        logger.exception("Could not save to the IELTS bank")
+
+
+def _bank_backup(key: str, user: dict, reason: str) -> dict:
+    """A practice item from the bank that this learner has not seen; 503 if none."""
+    try:
+        item = ielts_bank.pick(key, user["id"])
+    except Exception:
+        logger.exception("IELTS bank unavailable")
+        item = None
+    if not item:
+        raise HTTPException(status_code=503, detail=f"{reason} No backup task is available for you yet. Please try again later.")
+    ielts_bank.mark_used(user["id"], item)
+    return item
+
+
 @router.post("/ielts/writing/generate")
 def ielts_writing_generate(payload: IELTSWritingPromptPayload, user=Depends(require_user)):
     ensure_ielts_profile(user["id"])
-    return ielts_generate_writing_prompt(payload.test_type, payload.task_number)
+    key = _practice_writing_key(payload.test_type, payload.task_number)
+    try:
+        task = ielts_generate_writing_prompt(payload.test_type, payload.task_number)
+    except Exception:
+        logger.exception("Writing task generation failed; using the IELTS bank")
+        task = dict(_bank_backup(key, user, AI_DOWN)["content"])
+        task["backup"] = True
+        task["notice"] = f"{AI_DOWN} This is a ready-made task from the bank."
+        return task
+    _bank_save_quietly("practice", key, task.get("title") or key, task)
+    return task
 
 
 @router.post("/ielts/writing/assess")
 def ielts_writing_assess(payload: IELTSWritingAssessPayload, user=Depends(require_user)):
     ensure_ielts_profile(user["id"])
-    result = ielts_assess_writing(payload.test_type, payload.task_number, payload.prompt, payload.response,
-                                  payload.chart)
+    try:
+        result = ielts_assess_writing(payload.test_type, payload.task_number, payload.prompt, payload.response,
+                                      payload.chart)
+    except Exception:
+        logger.exception("Writing assessment failed")
+        raise HTTPException(status_code=503, detail=f"{AI_DOWN} Your text is still on the page — "
+                                                    "press Assess again in a few minutes.")
     save_ielts_writing(user["id"], payload.test_type, payload.task_number, payload.prompt, payload.response, result)
     return result  # IELTS stays separate from the general (CEFR) progress
 
@@ -1132,15 +1175,33 @@ def _speaking_take_answer(session: dict, prefix: str, turn_id: str, audio: Uploa
     if not pending or pending["id"] != turn_id:
         raise HTTPException(status_code=409, detail="This question has already been answered.")
     data = audio.file.read()
-    transcript = ""
+    transcript, pending = "", False
+    path = _speaking_store_audio(prefix, turn_id, data, audio.content_type) if data else None
     if data and len(data) > 1000:
         try:
             transcript = transcribe_audio(audio.filename or "answer.webm", data, audio.content_type)
         except Exception as exc:
             logger.exception("Transcription failed")
-            raise HTTPException(status_code=502, detail=f"Could not transcribe your answer: {exc}")
-    path = _speaking_store_audio(prefix, turn_id, data, audio.content_type) if data else None
-    ielts_speaking.record_answer(session, turn_id, transcript, path, seconds)
+            if not path:  # neither transcribed nor stored: the answer would be lost
+                raise HTTPException(status_code=502, detail=f"Could not save your answer: {exc}")
+            pending = True  # the stored recording is transcribed later
+    ielts_speaking.record_answer(session, turn_id, transcript, path, seconds, pending)
+
+
+def _speaking_fill_transcripts(session: dict) -> bool:
+    """Transcribe answers recorded while transcription was unavailable. True when none is left."""
+    done = True
+    for t in session["turns"]:
+        if not t.get("transcript_pending"):
+            continue
+        try:
+            data = admin_db().storage.from_(ielts_exam.BUCKET).download(t["audio_path"])
+            t["transcript"] = transcribe_audio("answer.webm", data, "audio/webm")
+            t["transcript_pending"] = False
+        except Exception:
+            logger.exception("Transcription still unavailable")
+            done = False
+    return done
 
 
 def _speaking_add_pronunciation(session: dict, result: dict, parts: list[int]) -> float:
@@ -1168,7 +1229,12 @@ def _speaking_add_pronunciation(session: dict, result: dict, parts: list[int]) -
 
 def _speaking_reply(session: dict) -> dict:
     turn = ielts_speaking.pending_turn(session) or session["turns"][-1]
-    return {"turn": ielts_speaking.public_turn(turn), "done": session["done"]}
+    try:
+        return {"turn": ielts_speaking.public_turn(turn), "done": session["done"]}
+    except Exception:
+        logger.exception("Examiner audio unavailable")
+        raise HTTPException(status_code=503, detail="The examiner's voice is not available right now. "
+                                                    "Your answers are saved — please try again in a few minutes.")
 
 
 def _practice_session_load(session_id: str, user_id: str) -> dict:
@@ -1186,12 +1252,21 @@ def _practice_session_save(session_id: str, content: dict) -> None:
 @router.post("/ielts/speaking/session")
 def ielts_speaking_session_start(payload: IELTSSpeakingSessionPayload, user=Depends(require_user)):
     ensure_ielts_profile(user["id"])
-    material = ielts_generate_speaking_set(payload.part)
-    content = {str(payload.part): {
-        "questions": material.get("questions") or [],
-        "cue_card": material.get("cue_card") or "",
-        "bullet_points": material.get("bullet_points") or [],
-    }}
+    key = f"speaking:{payload.part}"
+    backup = False
+    try:
+        material = ielts_generate_speaking_set(payload.part)
+        content = {str(payload.part): {
+            "questions": material.get("questions") or [],
+            "cue_card": material.get("cue_card") or "",
+            "bullet_points": material.get("bullet_points") or [],
+        }}
+        if _bank_save_quietly("practice", key, material.get("title") or key, {"material": material, "content": content}):
+            ielts_speaking.prevoice(content, [payload.part])
+    except Exception:
+        logger.exception("Speaking set generation failed; using the IELTS bank")
+        item = _bank_backup(key, user, AI_DOWN)
+        material, content, backup = item["content"]["material"], item["content"]["content"], True
     session = ielts_speaking.new_session(content, [payload.part])
     ielts_speaking.next_turn(session)
     row = admin_db().table("tests").insert({
@@ -1200,7 +1275,7 @@ def ielts_speaking_session_start(payload: IELTSSpeakingSessionPayload, user=Depe
         "questions": {"session": session, "material": material},
     }).execute()
     reply = _speaking_reply(session)
-    reply.update(session_id=row.data[0]["id"], part=payload.part)
+    reply.update(session_id=row.data[0]["id"], part=payload.part, backup=backup)
     return reply
 
 
@@ -1225,10 +1300,20 @@ def ielts_speaking_session_assess(session_id: str, user=Depends(require_user)):
     if content.get("result"):
         return content["result"]
     part = session["parts"][0]
+    unavailable = HTTPException(status_code=503, detail=f"{AI_DOWN} Your answers are saved — "
+                                                         "press Assess again in a few minutes.")
+    if not _speaking_fill_transcripts(session):
+        _practice_session_save(session_id, content)
+        raise unavailable
     transcript = ielts_speaking.transcripts_by_part(session).get(str(part), "")
     material = content.get("material") or {}
     prompt = material.get("cue_card") or "\n".join(material.get("questions") or [])
-    result = ielts_assess_speaking(part, prompt, transcript)
+    try:
+        result = ielts_assess_speaking(part, prompt, transcript)
+    except Exception:
+        logger.exception("Speaking assessment failed")
+        _practice_session_save(session_id, content)
+        raise unavailable
     result["transcript"] = transcript
     _speaking_add_pronunciation(session, result, [part])
     save_ielts_speaking(user["id"], part, prompt, transcript, result)
@@ -1241,24 +1326,48 @@ def ielts_speaking_session_assess(session_id: str, user=Depends(require_user)):
 def ielts_reading_generate(payload: IELTSPracticeGeneratePayload, user=Depends(require_user)):
     ensure_ielts_profile(user["id"])
     test_type = "General Training" if payload.test_type.lower().startswith("general") else "Academic"
-    content = ielts_generate_reading(test_type)
+    key = f"reading:{test_type}"
+    notice = ""
+    try:
+        content = ielts_generate_reading(test_type)
+        _bank_save_quietly("practice", key, content.get("title") or key, content)
+    except Exception:
+        logger.exception("Reading generation failed; using the IELTS bank")
+        item = _bank_backup(key, user, AI_DOWN)
+        content = dict(item["content"], bank_id=str(item["id"]))
+        notice = f"{AI_DOWN} This is a ready-made practice set from the bank."
     test_id = _ielts_practice_store(user, "reading", test_type, content)
     return {"test_id": test_id, "title": content.get("title"), "passage": content.get("passage"),
-            "questions": _ielts_public_questions(content)}
+            "questions": _ielts_public_questions(content), "notice": notice}
 
 
 @router.post("/ielts/listening/generate")
 def ielts_listening_generate(payload: IELTSPracticeGeneratePayload, user=Depends(require_user)):
     ensure_ielts_profile(user["id"])
-    content = ielts_generate_listening()
-    test_id = _ielts_practice_store(user, "listening", "Academic", content)
-    script = content.get("audio_script") or ""
-    listening_audio.start(
-        test_id, user["id"], builder=lambda: synthesize_speech(script, instructions=IELTS_LISTENING_VOICE),
-        max_plays=1,
-    )
+    notice = ""
+    try:
+        content = ielts_generate_listening()
+        test_id = _ielts_practice_store(user, "listening", "Academic", content)
+        script = content.get("audio_script") or ""
+        listening_audio.start(
+            test_id, user["id"], builder=lambda: synthesize_speech(script, instructions=IELTS_LISTENING_VOICE),
+            max_plays=1,
+            # a successfully voiced set may refill the bank (10 sets kept)
+            on_ready=lambda audio: _bank_save_quietly("practice", "listening", content.get("title") or "listening",
+                                                      content, {"1": audio}),
+        )
+    except Exception:
+        logger.exception("Listening generation failed; using the IELTS bank")
+        item = _bank_backup("listening", user, AI_DOWN)
+        audio = ielts_bank.load_audio((item.get("audio") or {}).get("1", ""))
+        if not audio:
+            raise HTTPException(status_code=503, detail=f"{AI_DOWN} The backup recording could not be loaded.")
+        content = dict(item["content"], bank_id=str(item["id"]), bank_audio=(item.get("audio") or {}).get("1"))
+        test_id = _ielts_practice_store(user, "listening", "Academic", content)
+        listening_audio.start(test_id, user["id"], audio=audio, max_plays=1)
+        notice = f"{AI_DOWN} This is a ready-made practice set from the bank."
     return {"test_id": test_id, "title": content.get("title"), "max_plays": 1,
-            "questions": _ielts_public_questions(content)}
+            "questions": _ielts_public_questions(content), "notice": notice}
 
 
 @router.get("/ielts/practice/{test_id}/audio")
@@ -1268,6 +1377,8 @@ def ielts_practice_audio(test_id: str, user=Depends(require_user)):
         return c if c and c.get("_section") == "listening" else None
 
     def audio_loader(c):
+        if c.get("bank_audio"):
+            return lambda: ielts_bank.load_audio(c["bank_audio"])
         script = c.get("audio_script") or ""
         return lambda: synthesize_speech(script, instructions=IELTS_LISTENING_VOICE)
 
@@ -1313,6 +1424,8 @@ def ielts_objective_submit(payload: IELTSObjectiveSubmitPayload, user=Depends(re
     pct = round(correct / total * 100)
     save_ielts_objective(user["id"], section, content.get("test_type") or "Academic",
                          content.get("title") or f"IELTS {section} practice", pct, None, payload.answers, details)
+    if content.get("bank_id"):
+        ielts_bank.record_stats(content["bank_id"], {"1": details})
     if section == "listening":
         listening_audio.mark_checked(payload.test_id)
     return {
@@ -1330,6 +1443,7 @@ def ielts_objective_submit(payload: IELTSObjectiveSubmitPayload, user=Depends(re
 
 class IELTSMockStartPayload(BaseModel):
     test_type: str = "Academic"
+    source: Literal["new", "verified"] = "new"   # "verified": an admin-approved exam from the bank
 
 
 class IELTSMockSectionPayload(BaseModel):
@@ -1405,10 +1519,74 @@ def _mock_section_done(mock: dict, section: str) -> bool:
 
 
 def _mock_start_prep(user: dict, mock: dict) -> None:
+    mock_id, test_type = mock["id"], mock.get("test_type") or "Academic"
     ielts_exam.prepare(
-        mock["id"], user["id"], mock.get("test_type") or "Academic",
+        mock_id, user["id"], test_type,
         _MOCK_GENERATORS, mock_save_generated_section, mock_get_section,
+        on_ready=lambda: _mock_bank_save(user["id"], mock_id, test_type),
+        on_error=lambda: _mock_fill_from_bank(user["id"], mock_id, test_type),
     )
+
+
+def _mock_set_content(user_id: str, mock_id: str, section: str, part: int, content: dict) -> None:
+    if mock_get_section(user_id, mock_id, section, part):
+        (admin_db().table("ielts_mock_sections").update({"content": content})
+         .eq("mock_id", mock_id).eq("user_id", user_id).eq("section", section).eq("part", part).execute())
+    else:
+        mock_save_generated_section(user_id, mock_id, section, part, content)
+
+
+def _mock_bank_save(user_id: str, mock_id: str, test_type: str) -> None:
+    """Copy a fully prepared paper into the bank (up to 5 per test type) and pre-voice the examiner."""
+    meta = ielts_exam._get_meta(mock_id)
+    key = ielts_bank.mock_key(test_type)
+    if meta.get("bank_id") or ielts_bank.count(key) >= ielts_bank.MOCK_LIMIT:
+        return
+    paper, audio = {}, {}
+    for section, n in ielts_exam.PARTS.items():
+        for p in range(1, n + 1):
+            row = mock_get_section(user_id, mock_id, section, p)
+            if not row:
+                return
+            paper.setdefault(section, {})[str(p)] = row["content"]
+    for p in (1, 2, 3, 4):
+        audio[str(p)] = ielts_exam.load_audio(mock_id, p)
+        if not audio[str(p)]:
+            return
+    paper["listening_durations"] = meta.get("listening_durations") or {}
+    title = f"{test_type} mock · {(paper['reading']['1'] or {}).get('title', '')}"
+    if _bank_save_quietly("mock", key, title, paper, audio, source_id=mock_id):
+        ielts_speaking.prevoice({p: paper["speaking"][p] for p in ("1", "2", "3")}, [1, 2, 3])
+
+
+def _mock_fill_from_bank(user_id: str, mock_id: str, test_type: str,
+                         verified_only: bool = False, replace_all: bool = False) -> bool:
+    """Complete (or replace) the paper with a bank exam the learner has not taken."""
+    item = ielts_bank.pick(ielts_bank.mock_key(test_type), user_id, verified_only)
+    if not item:
+        return False
+    paper = item["content"]
+    meta = ielts_exam._get_meta(mock_id)
+    durations = dict(meta.get("listening_durations") or {})
+    for section, n in ielts_exam.PARTS.items():
+        for p in range(1, n + 1):
+            have = mock_get_section(user_id, mock_id, section, p)
+            if section == "listening":
+                missing = replace_all or not have or str(p) not in durations or not ielts_exam.load_audio(mock_id, p)
+                if missing:
+                    audio = ielts_bank.load_audio((item.get("audio") or {}).get(str(p), ""))
+                    if not audio:
+                        return False
+                    _mock_set_content(user_id, mock_id, section, p, paper[section][str(p)])
+                    ielts_exam.store_audio(mock_id, p, audio)
+                    durations[str(p)] = (paper.get("listening_durations") or {}).get(str(p)) \
+                        or round(listening_audio.mp3_duration(audio), 1)
+            elif replace_all or not have:
+                _mock_set_content(user_id, mock_id, section, p, paper[section][str(p)])
+    ielts_exam.update_meta(mock_id, lambda m: m.update(
+        bank_id=str(item["id"]), listening_durations=durations, source="verified" if verified_only else "backup"))
+    ielts_bank.mark_used(user_id, item)
+    return True
 
 
 def _mock_finalize_objective(user_id: str, mock: dict, section: str, submitted: dict | None = None) -> None:
@@ -1431,6 +1609,12 @@ def _mock_finalize_objective(user_id: str, mock: dict, section: str, submitted: 
                               total_questions=len(details), result={"details": details})
     band = _mock_band_from_raw(section, raw_total, test_type)
     mock_update_band(user_id, mock_id, section, band)
+    bank_id = (mock.get("metadata") or {}).get("bank_id")
+    if bank_id and (mock.get("metadata") or {}).get("source") in ("verified", "backup"):
+        try:
+            ielts_bank.record_stats(bank_id, {f"{section}{p}": d for p, d in review.items()})
+        except Exception:
+            logger.exception("Could not record bank statistics")
     save_ielts_objective(user_id, section, test_type, f"Full IELTS Mock {section.title()}",
                          round(raw_total / max(total, 1) * 100), band, {"raw_score": raw_total},
                          [{"raw_score": raw_total, "total": total}])
@@ -1458,7 +1642,8 @@ def _mock_assess_writing(user_id: str, mock_id: str, test_type: str) -> None:
         ielts_exam.update_meta(mock_id, lambda m: m.update(writing_assessment="done"))
     except Exception as exc:
         logger.exception("Mock writing assessment failed")
-        ielts_exam.update_meta(mock_id, lambda m: m.update(writing_assessment="error", writing_error=str(exc)))
+        ielts_exam.update_meta(mock_id, lambda m: m.update(writing_assessment="pending", writing_error=str(exc),
+                                                           pending_tried_at=ielts_exam.iso(ielts_exam.now())))
 
 
 def _mock_finalize_expired(user: dict, mock: dict) -> dict:
@@ -1505,6 +1690,8 @@ def _mock_status_payload(mock: dict) -> dict:
             if len(meta.get("listening_durations") or {}) == 4 else None,
         "listening_served": meta.get("listening_served") or {},
         "writing_assessment": meta.get("writing_assessment"),
+        "pending": _mock_pending(meta),
+        "source": meta.get("source") or "new",
         "next_section": next_section,
         "server_time": ielts_exam.iso(ielts_exam.now()),
     }
@@ -1517,6 +1704,13 @@ def ielts_mock_start(payload: IELTSMockStartPayload, user=Depends(require_user))
     test_type = "General Training" if payload.test_type.lower().startswith("general") else "Academic"
     row = mock_start(user["id"], test_type)
     ielts_exam.update_meta(row["id"], lambda m: m.update(version=ielts_exam.VERSION, prep={"status": "running"}))
+    if payload.source == "verified":
+        if not _mock_fill_from_bank(user["id"], row["id"], test_type, verified_only=True, replace_all=True):
+            admin_db().table("ielts_mock_tests").update({"status": "abandoned"}).eq("id", row["id"]).execute()
+            raise HTTPException(status_code=409, detail="There is no verified exam of this type that you have not taken yet. "
+                                                        "Start a new exam instead.")
+        ielts_exam.update_meta(row["id"], lambda m: m.update(prep={"status": "ready", "step": "Done", "listening_ready": True}))
+        return _mock_status_payload(mock_get(user["id"], row["id"]))
     mock = mock_get(user["id"], row["id"])
     _mock_start_prep(user, mock)
     return _mock_status_payload(mock_get(user["id"], row["id"]))
@@ -1527,6 +1721,8 @@ def ielts_mock_status(mock_id: str, user=Depends(require_user)):
     mock = _mock_or_404(user, mock_id)
     if mock.get("status") == "in_progress" and (mock.get("metadata") or {}).get("version") == ielts_exam.VERSION:
         mock = _mock_finalize_expired(user, mock)
+        if _mock_pending(mock.get("metadata") or {}):
+            _mock_process_pending(user, mock)
     return _mock_status_payload(mock)
 
 
@@ -1672,30 +1868,94 @@ def ielts_mock_speaking_answer(mock_id: str, turn_id: str = Form(...), seconds: 
     return _speaking_reply(session)
 
 
-@router.post("/ielts/mock/{mock_id}/speaking/submit")
-def ielts_mock_speaking_submit(mock_id: str, user=Depends(require_user)):
-    mock = _mock_or_404(user, mock_id)
-    if _mock_section_done(mock, "speaking"):
-        return _mock_status_payload(mock)
+def _mock_assess_speaking(user_id: str, mock_id: str) -> bool:
+    """Transcribe (if needed) and assess the recorded interview. False if the AI is unavailable."""
+    mock = mock_get(user_id, mock_id)
     session = (mock.get("metadata") or {}).get("speaking_session")
-    if not session or not session.get("done"):
-        raise HTTPException(status_code=400, detail="The Speaking test is not finished yet.")
+    ok = _speaking_fill_transcripts(session)
+    ielts_exam.update_meta(mock_id, lambda m: m.update(speaking_session=session))
+    if not ok:
+        return False
     transcripts = ielts_speaking.transcripts_by_part(session)
     parts = {}
     for p in (1, 2, 3):
-        row = mock_get_section(user["id"], mock_id, "speaking", p)
+        row = mock_get_section(user_id, mock_id, "speaking", p)
         parts[f"part{p}"] = {"prompt": (row or {}).get("content"), "transcript": transcripts.get(str(p), "(no answer)")}
-
-    result = mock_assess_full_speaking(parts)
+    try:
+        result = mock_assess_full_speaking(parts)
+    except Exception:
+        logger.exception("Speaking assessment unavailable")
+        return False
     band = _speaking_add_pronunciation(session, result, [1, 2, 3])
     for p in (1, 2, 3):
-        row = mock_get_section(user["id"], mock_id, "speaking", p)
-        audio_paths = [t["audio_path"] for t in session["turns"] if t["part"] == p and t.get("audio_path")]
-        mock_complete_section(user["id"], mock_id, "speaking", p,
-                              answers={"transcript": transcripts.get(str(p), ""), "audio": audio_paths},
-                              estimated_band=band, result=result)
-        save_ielts_speaking(user["id"], p, str((row or {}).get("content")), transcripts.get(str(p), ""), result)
-    mock_update_band(user["id"], mock_id, "speaking", band)
+        row = mock_get_section(user_id, mock_id, "speaking", p)
+        mock_complete_section(user_id, mock_id, "speaking", p, estimated_band=band, result=result,
+                              answers={"transcript": transcripts.get(str(p), ""),
+                                       "audio": [t["audio_path"] for t in session["turns"] if t["part"] == p and t.get("audio_path")]})
+        save_ielts_speaking(user_id, p, str((row or {}).get("content")), transcripts.get(str(p), ""), result)
+    mock_update_band(user_id, mock_id, "speaking", band)
+    ielts_exam.update_meta(mock_id, lambda m: m.update(speaking_assessment="done"))
+    return True
+
+
+def _mock_pending(meta: dict) -> list[str]:
+    out = []
+    if meta.get("writing_assessment") in ("running", "pending", "error"):
+        out.append("writing")
+    if meta.get("speaking_assessment") in ("running", "pending"):
+        out.append("speaking")
+    return out
+
+
+def _mock_process_pending(user: dict, mock: dict, force: bool = False) -> None:
+    """Retry assessments that waited for the AI service (at most every 2 minutes)."""
+    meta = mock.get("metadata") or {}
+    last = ielts_exam.parse(meta.get("pending_tried_at"))
+    if not force and last and ielts_exam.now() - last < timedelta(minutes=2):
+        return
+    mock_id, test_type = mock["id"], mock.get("test_type") or "Academic"
+    todo = []
+    if meta.get("writing_assessment") in ("pending", "error"):
+        todo.append("writing")
+    if meta.get("speaking_assessment") == "pending":
+        todo.append("speaking")
+    if not todo:
+        return
+
+    def mark(m):
+        m["pending_tried_at"] = ielts_exam.iso(ielts_exam.now())
+        for section in todo:
+            m[f"{section}_assessment"] = "running"
+    ielts_exam.update_meta(mock_id, mark)
+
+    def job():
+        if "writing" in todo:
+            _mock_assess_writing(user["id"], mock_id, test_type)
+        if "speaking" in todo:
+            ok = _mock_assess_speaking(user["id"], mock_id)
+            if not ok:
+                ielts_exam.update_meta(mock_id, lambda m: m.update(speaking_assessment="pending"))
+    threading.Thread(target=job, daemon=True).start()
+
+
+@router.post("/ielts/mock/{mock_id}/speaking/submit")
+def ielts_mock_speaking_submit(mock_id: str, user=Depends(require_user)):
+    mock = _mock_or_404(user, mock_id)
+    meta = mock.get("metadata") or {}
+    if _mock_section_done(mock, "speaking"):
+        return _mock_status_payload(mock)
+    session = meta.get("speaking_session")
+    if not session or not session.get("done"):
+        raise HTTPException(status_code=400, detail="The Speaking test is not finished yet.")
+    if not _mock_assess_speaking(user["id"], mock_id):
+        # The AI is unavailable: keep the recordings and assess later.
+        transcripts = ielts_speaking.transcripts_by_part(session)
+        for p in (1, 2, 3):
+            mock_complete_section(user["id"], mock_id, "speaking", p,
+                                  answers={"transcript": transcripts.get(str(p), ""),
+                                           "audio": [t["audio_path"] for t in session["turns"] if t["part"] == p and t.get("audio_path")]})
+        ielts_exam.update_meta(mock_id, lambda m: m.update(speaking_assessment="pending",
+                                                           pending_tried_at=ielts_exam.iso(ielts_exam.now())))
     return _mock_status_payload(mock_get(user["id"], mock_id))
 
 
@@ -1703,16 +1963,24 @@ def ielts_mock_speaking_submit(mock_id: str, user=Depends(require_user)):
 def ielts_mock_finish(mock_id: str, user=Depends(require_user)):
     mock = _mock_or_404(user, mock_id)
     meta = mock.get("metadata") or {}
-    if meta.get("writing_assessment") == "running":
-        raise HTTPException(status_code=202, detail="Writing is still being assessed. Please wait a moment.")
-    if meta.get("writing_assessment") == "error":
-        threading.Thread(target=_mock_assess_writing,
-                         args=(user["id"], mock_id, mock.get("test_type") or "Academic"), daemon=True).start()
-        ielts_exam.update_meta(mock_id, lambda m: m.update(writing_assessment="running"))
-        raise HTTPException(status_code=202, detail="Retrying the Writing assessment. Please wait a moment.")
+    pending = _mock_pending(meta)
+    if pending:
+        _mock_process_pending(user, mock)
     bands = [mock.get("listening_band"), mock.get("reading_band"), mock.get("writing_band"), mock.get("speaking_band")]
-    if any(x is None for x in bands):
+    if not pending and any(x is None for x in bands):
         raise HTTPException(status_code=400, detail="Complete all four IELTS sections before finishing the mock.")
+    if pending:
+        return {
+            "pending": pending,
+            "overall_band": None,
+            "bands": {k: (float(v) if v is not None else None) for k, v in
+                      zip(("listening", "reading", "writing", "speaking"), bands)},
+            "review": _mock_review(user, mock_id),
+            "detail": ("Listening and Reading are marked. " + " and ".join(s.title() for s in pending) +
+                       (" is" if len(pending) == 1 else " are") +
+                       " waiting for the AI examiner, which is busy or unavailable right now. "
+                       "Your answers are saved; the result will appear here automatically."),
+        }
     overall = ielts_overall_band([float(x) for x in bands])
     if mock.get("status") != "completed":
         mock_finish(user["id"], mock_id, overall)
@@ -1729,6 +1997,21 @@ def ielts_mock_finish(mock_id: str, user=Depends(require_user)):
         }).execute()
 
     full = mock_get(user["id"], mock_id)
+    review = _mock_review(user, mock_id)
+    return {
+        "mock": {k: full.get(k) for k in ("id", "test_type", "status", "started_at", "completed_at")},
+        "overall_band": overall,
+        "bands": {"listening": float(bands[0]), "reading": float(bands[1]),
+                  "writing": float(bands[2]), "speaking": float(bands[3])},
+        "review": review,
+        "source": meta.get("source") or "new",
+        "disclaimer": ("Practice estimate only. This is not an official IELTS result."
+                       + ("" if (review.get("speaking", {}).get("1", {}).get("result") or {}).get("pronunciation") is not None
+                          else " Speaking pronunciation could not be assessed this time, so Speaking uses three criteria.")),
+    }
+
+
+def _mock_review(user: dict, mock_id: str) -> dict:
     review = {}
     for section in ("listening", "reading", "writing", "speaking"):
         for p in range(1, ielts_exam.PARTS[section] + 1):
@@ -1742,13 +2025,57 @@ def ielts_mock_finish(mock_id: str, user=Depends(require_user)):
                 "transcript": (row.get("content") or {}).get("audio_script") if section == "listening"
                               else ((row.get("answers") or {}).get("transcript") if section == "speaking" else None),
             }
-    return {
-        "mock": {k: full.get(k) for k in ("id", "test_type", "status", "started_at", "completed_at")},
-        "overall_band": overall,
-        "bands": {"listening": float(bands[0]), "reading": float(bands[1]),
-                  "writing": float(bands[2]), "speaking": float(bands[3])},
-        "review": review,
-        "disclaimer": ("Practice estimate only. This is not an official IELTS result."
-                       + ("" if (review.get("speaking", {}).get("1", {}).get("result") or {}).get("pronunciation") is not None
-                          else " Speaking pronunciation could not be assessed this time, so Speaking uses three criteria.")),
-    }
+    return review
+
+
+# ========================= ADMIN: IELTS bank =========================
+
+class IELTSBankVerifyPayload(BaseModel):
+    verified: bool
+
+
+@router.get("/admin/ielts-bank")
+def admin_ielts_bank_list(user=Depends(require_user)):
+    _require_admin(user)
+    try:
+        items = ielts_bank.list_items()
+    except Exception as exc:
+        logger.exception("IELTS bank list failed")
+        return {"error": "The IELTS bank is not set up in Supabase yet. Run database/ielts_bank.sql "
+                         f"in the Supabase SQL Editor. Details: {exc}", "items": []}
+    return {"items": items, "mock_limit": ielts_bank.MOCK_LIMIT, "practice_limit": ielts_bank.PRACTICE_LIMIT}
+
+
+@router.get("/admin/ielts-bank/{item_id}")
+def admin_ielts_bank_item(item_id: str, user=Depends(require_user)):
+    _require_admin(user)
+    item = ielts_bank.get(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found.")
+    item["suspicious"] = ielts_bank.suspicious(item)
+    return item
+
+
+@router.get("/admin/ielts-bank/{item_id}/audio/{name}")
+def admin_ielts_bank_audio(item_id: str, name: str, user=Depends(require_user)):
+    _require_admin(user)
+    item = ielts_bank.get(item_id)
+    path = ((item or {}).get("audio") or {}).get(name)
+    audio = ielts_bank.load_audio(path) if path else None
+    if not audio:
+        raise HTTPException(status_code=404, detail="Recording not found.")
+    return StreamingResponse(BytesIO(audio), media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
+
+
+@router.post("/admin/ielts-bank/{item_id}/verify")
+def admin_ielts_bank_verify(item_id: str, payload: IELTSBankVerifyPayload, user=Depends(require_user)):
+    _require_admin(user)
+    ielts_bank.set_verified(item_id, payload.verified)
+    return {"ok": True}
+
+
+@router.delete("/admin/ielts-bank/{item_id}")
+def admin_ielts_bank_delete(item_id: str, user=Depends(require_user)):
+    _require_admin(user)
+    ielts_bank.delete(item_id)
+    return {"ok": True}

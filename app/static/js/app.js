@@ -844,7 +844,8 @@ async function generateIELTSWriting() {
     document.getElementById("ieltsWritingChart").innerHTML = "";
     if (currentIELTSWriting.chart) renderTask1Chart("ieltsWritingChart", currentIELTSWriting.chart);
     document.getElementById("ieltsWritingMeta").textContent = `Minimum ${currentIELTSWriting.minimum_words || (payload.task_number===1?150:250)} words · Suggested ${currentIELTSWriting.suggested_minutes || (payload.task_number===1?20:40)} minutes`;
-    document.getElementById("ieltsWritingResult").innerHTML = "";
+    document.getElementById("ieltsWritingResult").innerHTML = currentIELTSWriting.notice
+      ? `<div class="alert alert-info">${esc(currentIELTSWriting.notice)}</div>` : "";
   } catch(e) { document.getElementById("ieltsWritingResult").textContent = e.message; }
 }
 
@@ -880,6 +881,32 @@ async function assessIELTSWriting() {
 
 let ieltsSpeakingSession = null;
 
+async function assessIELTSSpeakingSession(sessionId) {
+  const result = document.getElementById("ieltsSpeakingResult");
+  result.innerHTML = `<div class="loader">Assessing your answers…</div>`;
+  let d;
+  try {
+    d = await api(`/api/ielts/speaking/session/${sessionId}/assess`, {method: "POST", body: "{}"});
+  } catch (e) {
+    result.innerHTML = `<div class="alert alert-warning">${esc(e.message)}
+      <button class="btn btn-sm btn-outline-primary ms-2" onclick="assessIELTSSpeakingSession('${esc(sessionId)}')">Assess again</button></div>`;
+    return;
+  }
+    result.innerHTML = `
+      <div class="d-flex justify-content-between"><h4>${d.speaking_band != null
+          ? `Speaking band ${esc(Number(d.speaking_band).toFixed(1))}`
+          : `Language band ${esc(Number(d.provisional_language_band).toFixed(1))}`}</h4>
+        <span class="badge ${d.pronunciation != null ? "text-bg-success" : "text-bg-warning"}">${d.pronunciation != null ? "All 4 criteria · AI estimate" : "Pronunciation could not be assessed"}</span></div>
+      <div class="row g-2 my-2">${bandCard("Fluency & Coherence", d.fluency_coherence)}${bandCard("Lexical Resource", d.lexical_resource)}${bandCard("Grammar", d.grammatical_range_accuracy)}${bandCard("Pronunciation", d.pronunciation)}</div>
+      <p class="small text-secondary">${esc(d.disclaimer || "")}</p>
+      <h6>Strengths</h6><ul>${(d.strengths || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul>
+      <h6>Improve</h6>${(d.improvements || []).map(x => `<div class="mb-2"><strong>${esc(x.criterion)}:</strong> ${esc(x.issue)}<br><span class="text-secondary">${esc(x.action)}</span></div>`).join("")}
+      ${pronunciationFeedbackHTML(d.pronunciation_feedback)}
+      ${(d.better_phrasing || []).length ? `<h6 class="mt-3">Better phrasing</h6>${d.better_phrasing.map(x => `<div class="mb-1"><code>${esc(x.original)}</code> → <strong>${esc(x.improved)}</strong></div>`).join("")}` : ""}
+      <details class="mt-3"><summary>Transcript of the conversation</summary><div class="small mt-2" style="white-space:pre-line">${esc(d.transcript || "")}</div></details>`;
+    await loadIELTSDashboard();
+}
+
 function pronunciationFeedbackHTML(p) {
   if (!p) return "";
   return `<div class="card-soft my-3"><h6>Pronunciation · band ${esc(p.pronunciation)}</h6>
@@ -904,21 +931,7 @@ async function startIELTSSpeaking() {
     ieltsSpeakingSession = first.session_id;
     await runExaminer(box, first, `/api/ielts/speaking/session/${first.session_id}/answer`);
     examinerRelease();
-    result.innerHTML = `<div class="loader">Assessing your answers…</div>`;
-    const d = await api(`/api/ielts/speaking/session/${first.session_id}/assess`, {method: "POST", body: "{}"});
-    result.innerHTML = `
-      <div class="d-flex justify-content-between"><h4>${d.speaking_band != null
-          ? `Speaking band ${esc(Number(d.speaking_band).toFixed(1))}`
-          : `Language band ${esc(Number(d.provisional_language_band).toFixed(1))}`}</h4>
-        <span class="badge ${d.pronunciation != null ? "text-bg-success" : "text-bg-warning"}">${d.pronunciation != null ? "All 4 criteria · AI estimate" : "Pronunciation could not be assessed"}</span></div>
-      <div class="row g-2 my-2">${bandCard("Fluency & Coherence", d.fluency_coherence)}${bandCard("Lexical Resource", d.lexical_resource)}${bandCard("Grammar", d.grammatical_range_accuracy)}${bandCard("Pronunciation", d.pronunciation)}</div>
-      <p class="small text-secondary">${esc(d.disclaimer || "")}</p>
-      <h6>Strengths</h6><ul>${(d.strengths || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul>
-      <h6>Improve</h6>${(d.improvements || []).map(x => `<div class="mb-2"><strong>${esc(x.criterion)}:</strong> ${esc(x.issue)}<br><span class="text-secondary">${esc(x.action)}</span></div>`).join("")}
-      ${pronunciationFeedbackHTML(d.pronunciation_feedback)}
-      ${(d.better_phrasing || []).length ? `<h6 class="mt-3">Better phrasing</h6>${d.better_phrasing.map(x => `<div class="mb-1"><code>${esc(x.original)}</code> → <strong>${esc(x.improved)}</strong></div>`).join("")}` : ""}
-      <details class="mt-3"><summary>Transcript of the conversation</summary><div class="small mt-2" style="white-space:pre-line">${esc(d.transcript || "")}</div></details>`;
-    await loadIELTSDashboard();
+    await assessIELTSSpeakingSession(first.session_id);
   } catch (e) {
     box.insertAdjacentHTML("beforeend", `<div class="alert alert-danger mt-2">${esc(e.message)}</div>`);
   } finally {
@@ -944,6 +957,7 @@ async function generateIELTSReading() {
       test_type:document.getElementById("ieltsReadingType").value
     })});
     renderIELTSQuestions("ieltsReadingContent", currentIELTSReading, "reading");
+    if (currentIELTSReading.notice) document.getElementById("ieltsReadingContent").insertAdjacentHTML("afterbegin", `<div class="alert alert-info">${esc(currentIELTSReading.notice)}</div>`);
   } catch(e) { document.getElementById("ieltsReadingContent").textContent=e.message; }
 }
 
@@ -955,6 +969,7 @@ async function generateIELTSListening() {
     btn.disabled = false;
     btn.textContent = "▶ Play recording (once)";
     renderIELTSQuestions("ieltsListeningContent", currentIELTSListening, "listening");
+    if (currentIELTSListening.notice) document.getElementById("ieltsListeningContent").insertAdjacentHTML("afterbegin", `<div class="alert alert-info">${esc(currentIELTSListening.notice)}</div>`);
   } catch(e) { document.getElementById("ieltsListeningContent").textContent=e.message; }
 }
 
@@ -1027,7 +1042,7 @@ if (ieltsWritingResponse) ieltsWritingResponse.addEventListener("input", () => {
 const originalOpenPage = openPage;
 openPage = function(name) {
   originalOpenPage(name);
-  if (name === "ielts-dashboard") loadIELTSDashboard();
+  if (name === "ielts-dashboard") { loadIELTSDashboard(); loadIELTSBankAdmin(); }
 };
 
 
@@ -1099,15 +1114,17 @@ function stopMockTimers() {
 function showMockExam() {
   document.getElementById("mockSetup").classList.add("d-none");
   document.getElementById("mockExam").classList.remove("d-none");
-  document.getElementById("mockExamLabel").textContent = `${fullMock?.test_type || "IELTS"} · computer-delivered format`;
+  const src = {verified: " · verified exam", backup: " · backup paper from the bank"}[fullMock?.source] || "";
+  document.getElementById("mockExamLabel").textContent = `${fullMock?.test_type || "IELTS"} · computer-delivered format${src}`;
 }
 
 async function startFullIELTSMock() {
   const test_type = document.getElementById("mockTestType").value;
+  const source = document.getElementById("mockSource")?.value || "new";
   const btn = document.getElementById("mockStartBtn");
   if (btn) { btn.disabled = true; btn.textContent = "Starting…"; }
   try {
-    fullMock = await api("/api/ielts/mock/start", {method: "POST", body: JSON.stringify({test_type})});
+    fullMock = await api("/api/ielts/mock/start", {method: "POST", body: JSON.stringify({test_type, source})});
     mockSyncClock(fullMock.server_time);
     localStorage.setItem("activeIELTSMockId", fullMock.mock_id);
     showMockExam();
@@ -1599,9 +1616,18 @@ async function finishFullIELTSMock() {
   document.getElementById("mockTimer").textContent = "--:--";
   try {
     const d = await api(`/api/ielts/mock/${fullMock.mock_id}/finish`, {method: "POST", body: "{}"});
-    if (d.overall_band == null) {  // writing is still being assessed
-      ws.innerHTML = `<div class="loader">${esc(d.detail || "Assessing Writing…")}</div>`;
-      mockPollTimer = setTimeout(finishFullIELTSMock, 5000);
+    if (d.overall_band == null) {  // Writing/Speaking are waiting for the AI examiner
+      const b = d.bands || {};
+      const card = (label, v) => v == null
+        ? `<div class="col-6 col-lg"><div class="card-soft text-center h-100"><div class="small text-secondary">${esc(label)}</div><div class="skill-score">⏳</div><div class="small">pending</div></div></div>`
+        : bandCard(label, v);
+      ws.innerHTML = `
+        <div class="alert alert-info">${esc(d.detail || "Assessing…")}</div>
+        <div class="row g-3 mb-4">${card("Listening", b.listening)}${card("Reading", b.reading)}${card("Writing", b.writing)}${card("Speaking", b.speaking)}</div>
+        <div class="card-soft mb-3"><h5>Listening review</h5>${mockObjectiveReview("listening", d.review?.listening)}</div>
+        <div class="card-soft mb-3"><h5>Reading review</h5>${mockObjectiveReview("reading", d.review?.reading)}</div>
+        <p class="small text-secondary">This page checks again every 30 seconds. You can also close it and come back later — the result is kept.</p>`;
+      mockPollTimer = setTimeout(finishFullIELTSMock, 30000);
       return;
     }
     const b = d.bands || {};
@@ -2310,4 +2336,138 @@ async function runExaminer(container, firstReply, answerUrl) {
       }
     }
   }
+}
+
+
+/* ===================== Admin: IELTS bank (view / verify / delete) ===================== */
+
+const BANK_LABELS = {
+  "mock:Academic": "Full mock · Academic", "mock:General Training": "Full mock · General Training",
+  "reading:Academic": "Reading · Academic", "reading:General Training": "Reading · General Training",
+  "listening": "Listening", "writing:Academic:1": "Writing Task 1 · Academic",
+  "writing:General Training:1": "Writing Task 1 · General Training", "writing:2": "Writing Task 2",
+  "speaking:1": "Speaking Part 1", "speaking:2": "Speaking Part 2", "speaking:3": "Speaking Part 3",
+};
+
+async function loadIELTSBankAdmin() {
+  const box = document.getElementById("ieltsBankAdmin");
+  if (!box) return;
+  if (!currentProfile?.is_admin) { box.innerHTML = ""; return; }
+  let d;
+  try { d = await api("/api/admin/ielts-bank"); } catch (e) { d = {error: e.message, items: []}; }
+  if (d.error) {
+    box.innerHTML = `<div class="card-soft"><h5>IELTS bank <span class="badge text-bg-secondary">admin</span></h5>
+      <div class="alert alert-warning small mb-0">${esc(d.error)}</div></div>`;
+    return;
+  }
+  const groups = {};
+  (d.items || []).forEach(it => (groups[it.bank_key] = groups[it.bank_key] || []).push(it));
+  const keys = Object.keys(BANK_LABELS);
+  box.innerHTML = `<div class="card-soft">
+    <h5>IELTS bank <span class="badge text-bg-secondary">admin</span></h5>
+    <p class="small text-secondary">Filled automatically from successful generations (up to ${d.mock_limit} full mocks per test type and ${d.practice_limit} practice sets per section).
+      Used when OpenAI is unavailable; <strong>verified</strong> full mocks can also be chosen by learners. ⚠ marks questions that almost nobody answers “correctly” — check the key.</p>
+    ${keys.map(k => {
+      const items = groups[k] || [];
+      const limit = k.startsWith("mock:") ? d.mock_limit : d.practice_limit;
+      return `<details class="mb-2" ${k.startsWith("mock:") ? "open" : ""}><summary><strong>${esc(BANK_LABELS[k])}</strong>
+          <span class="badge ${items.length >= limit ? "text-bg-success" : "text-bg-light"} ms-1">${items.length}/${limit}</span></summary>
+        ${items.length ? `<table class="table table-sm align-middle mt-2 mb-1"><tbody>${items.map(it => `
+          <tr><td>${esc(it.title || "")}<div class="small text-secondary">${esc(String(it.created_at || "").slice(0, 10))} · used ${esc(it.times_used || 0)}×
+              ${it.suspicious?.length ? ` · <span class="text-danger">⚠ ${it.suspicious.length} suspicious</span>` : ""}</div></td>
+            <td class="text-end text-nowrap">
+              <div class="form-check form-switch d-inline-block me-2"><input class="form-check-input" type="checkbox" ${it.verified ? "checked" : ""}
+                onchange="verifyBankItem('${it.id}', this.checked)" title="Verified"><label class="small">verified</label></div>
+              <button class="btn btn-sm btn-outline-primary" onclick="viewBankItem('${it.id}')">View</button>
+              <button class="btn btn-sm btn-outline-danger" onclick="deleteBankItem('${it.id}')">Delete</button>
+            </td></tr>
+          <tr class="d-none" id="bankView_${it.id}"><td colspan="2"></td></tr>`).join("")}</tbody></table>`
+          : `<div class="small text-secondary mt-1 mb-2">Empty — it fills itself as learners use this section.</div>`}
+      </details>`;
+    }).join("")}
+  </div>`;
+}
+
+async function verifyBankItem(id, verified) {
+  try { await api(`/api/admin/ielts-bank/${id}/verify`, {method: "POST", body: JSON.stringify({verified})}); }
+  catch (e) { alert(e.message); }
+}
+
+async function deleteBankItem(id) {
+  if (!confirm("Delete this item from the bank? Its recordings are deleted too. This cannot be undone.")) return;
+  try { await api(`/api/admin/ielts-bank/${id}`, {method: "DELETE"}); await loadIELTSBankAdmin(); }
+  catch (e) { alert(e.message); }
+}
+
+async function loadBankAudio(id, name, elId) {
+  const el = document.getElementById(elId);
+  el.innerHTML = `<span class="small text-secondary">Loading…</span>`;
+  try {
+    const res = await fetch(`/api/admin/ielts-bank/${id}/audio/${name}`, {headers: {"Authorization": `Bearer ${currentSession.access_token}`}});
+    if (!res.ok) throw new Error("Recording not found.");
+    el.innerHTML = `<audio controls src="${URL.createObjectURL(await res.blob())}" style="width:100%"></audio>`;
+  } catch (e) { el.textContent = e.message; }
+}
+
+function bankQuestionsHTML(c, suspiciousPrefix, suspicious) {
+  const key = c.answer_key || {};
+  return `<table class="table table-sm small"><thead><tr><th>#</th><th>Question</th><th>Answer key</th><th>Explanation</th></tr></thead><tbody>
+    ${(c.questions || []).map(q => {
+      const ans = key[String(q.id)];
+      const bad = suspicious.includes(`${suspiciousPrefix}:${q.id}`);
+      return `<tr class="${bad ? "table-danger" : ""}"><td>${esc(q.id)}${bad ? " ⚠" : ""}</td>
+        <td>${esc(q.question)}${(q.options || []).length ? `<div class="text-secondary">${q.options.map(esc).join(" · ")}</div>` : ""}${q.instruction ? `<div class="text-secondary fst-italic">${esc(q.instruction)}</div>` : ""}</td>
+        <td><strong>${esc(Array.isArray(ans) ? ans.join(" / ") : (ans ?? ""))}</strong></td>
+        <td class="text-secondary">${esc((c.explanations || {})[String(q.id)] || "")}</td></tr>`;
+    }).join("")}</tbody></table>`;
+}
+
+function bankTextHTML(title, text) {
+  return text ? `<details class="mb-2"><summary>${esc(title)}</summary><div class="small mt-1" style="white-space:pre-line">${esc(text)}</div></details>` : "";
+}
+
+async function viewBankItem(id) {
+  const row = document.getElementById(`bankView_${id}`);
+  if (!row.classList.contains("d-none")) { row.classList.add("d-none"); return; }
+  row.classList.remove("d-none");
+  const cell = row.querySelector("td");
+  cell.innerHTML = `<div class="loader">Loading…</div>`;
+  let it;
+  try { it = await api(`/api/admin/ielts-bank/${id}`); } catch (e) { cell.textContent = e.message; return; }
+  const c = it.content || {}, sus = it.suspicious || [];
+  let html = "";
+  if (it.kind === "mock") {
+    html += [1, 2, 3, 4].map(p => {
+      const part = c.listening?.[String(p)] || {};
+      return `<h6 class="mt-3">Listening Part ${p}: ${esc(part.title || "")}</h6>
+        <div id="bankAudio_${id}_${p}"><button class="btn btn-sm btn-outline-secondary" onclick="loadBankAudio('${id}','${p}','bankAudio_${id}_${p}')">▶ Load recording</button></div>
+        ${bankTextHTML("Transcript", part.audio_script)}${bankQuestionsHTML(part, `listening${p}`, sus)}`;
+    }).join("");
+    html += [1, 2, 3].map(p => {
+      const part = c.reading?.[String(p)] || {};
+      return `<h6 class="mt-3">Reading ${p}: ${esc(part.title || "")}</h6>${bankTextHTML("Passage", part.passage)}${bankQuestionsHTML(part, `reading${p}`, sus)}`;
+    }).join("");
+    html += [1, 2].map(p => {
+      const t = c.writing?.[String(p)] || {};
+      return `<h6 class="mt-3">Writing Task ${p}</h6><div class="small" style="white-space:pre-line">${esc(t.prompt || "")}</div><div id="bankChart_${id}_${p}"></div>`;
+    }).join("");
+    html += `<h6 class="mt-3">Speaking</h6><div class="small">
+      <strong>Part 1:</strong> ${(c.speaking?.["1"]?.questions || []).map(esc).join(" · ")}<br>
+      <strong>Part 2:</strong> ${esc(c.speaking?.["2"]?.cue_card || "")} (${(c.speaking?.["2"]?.bullet_points || []).map(esc).join("; ")})<br>
+      <strong>Part 3:</strong> ${(c.speaking?.["3"]?.questions || []).map(esc).join(" · ")}</div>`;
+  } else if (it.bank_key.startsWith("reading")) {
+    html = bankTextHTML("Passage", c.passage) + bankQuestionsHTML(c, "1", sus);
+  } else if (it.bank_key === "listening") {
+    html = `<div id="bankAudio_${id}_1"><button class="btn btn-sm btn-outline-secondary" onclick="loadBankAudio('${id}','1','bankAudio_${id}_1')">▶ Load recording</button></div>`
+      + bankTextHTML("Transcript", c.audio_script) + bankQuestionsHTML(c, "1", sus);
+  } else if (it.bank_key.startsWith("writing")) {
+    html = `<div class="small" style="white-space:pre-line">${esc(c.prompt || "")}</div><div id="bankChart_${id}_1"></div>`;
+  } else {
+    const m = c.material || {};
+    html = `<div class="small">${esc(m.cue_card || "")} ${(m.bullet_points || []).length ? `(${m.bullet_points.map(esc).join("; ")})` : ""}
+      ${(m.questions || []).length ? `<ol>${m.questions.map(q => `<li>${esc(q)}</li>`).join("")}</ol>` : ""}</div>`;
+  }
+  cell.innerHTML = `<div class="p-2 border rounded bg-light">${html}</div>`;
+  if (it.kind === "mock" && c.writing?.["1"]?.chart) renderTask1Chart(`bankChart_${id}_1`, c.writing["1"].chart);
+  if (it.bank_key.startsWith("writing") && c.chart) renderTask1Chart(`bankChart_${id}_1`, c.chart);
 }

@@ -11,10 +11,19 @@ mock metadata (full mock) or in the tests table (practice of one part).
 from __future__ import annotations
 
 import base64
+import hashlib
+import logging
+import threading
 import time
 import uuid
 
 from app.services.openai_service import ask_json, synthesize_speech
+from app.services.supabase_service import admin_db
+
+logger = logging.getLogger(__name__)
+PHRASE_BUCKET = "listening-audio"
+ROUNDING_OFF_FALLBACK = "Thank you. Is that something you would like to experience again?"
+END_TEXT = "Thank you. That is the end of the Speaking test."
 
 EXAMINER_VOICE = "cedar"
 EXAMINER_STYLE = ("You are an IELTS Speaking examiner: polite, neutral and clear, speaking at a natural, "
@@ -96,9 +105,11 @@ def _adaptive_question(kind: str, session: dict) -> str:
         if q:
             return q
     except Exception:
-        pass
+        logger.warning("Adaptive question unavailable; using the planned question")
+    if kind == "rounding_off":
+        return ROUNDING_OFF_FALLBACK.replace("Thank you. ", "")
     planned = c3.get("questions") or ["Why do you think that is?"]
-    return planned[min(session["state"]["part3_asked"], len(planned) - 1)]
+    return planned[min(max(session["state"]["part3_asked"] - 1, 0), len(planned) - 1)]
 
 
 def next_turn(session: dict) -> dict:
@@ -111,7 +122,7 @@ def next_turn(session: dict) -> dict:
             later = [p for p in session["parts"] if p > part]
             if not later:
                 session["done"] = True
-                return _turn(session, part, "end", "Thank you. That is the end of the Speaking test.", answer_seconds=0)
+                return _turn(session, part, "end", END_TEXT, answer_seconds=0)
             st.update(part=later[0], index=0, part_started=None)
             continue
 
@@ -161,29 +172,85 @@ def next_turn(session: dict) -> dict:
             continue
 
         session["done"] = True
-        return _turn(session, part, "end", "Thank you. That is the end of the Speaking test.", answer_seconds=0)
+        return _turn(session, part, "end", END_TEXT, answer_seconds=0)
 
 
-def record_answer(session: dict, turn_id: str, transcript: str, audio_path: str | None, seconds: float | None) -> None:
+def record_answer(session: dict, turn_id: str, transcript: str | None, audio_path: str | None,
+                  seconds: float | None, pending: bool = False) -> None:
     for t in session["turns"]:
         if t["id"] == turn_id:
             t["transcript"] = transcript or ""
             t["audio_path"] = audio_path
             t["spoken_seconds"] = seconds
+            t["transcript_pending"] = pending  # transcription service unavailable: done later
             return
     raise KeyError("Unknown turn")
 
 
 _tts_cache: dict[str, str] = {}
+_stored_phrases: set[str] = set()
+
+
+def _phrase_path(text: str) -> str:
+    return f"examiner/{hashlib.sha1(text.encode()).hexdigest()}.mp3"
+
+
+def _store_phrase(text: str, audio: bytes) -> None:
+    path = _phrase_path(text)
+    if path in _stored_phrases:
+        return
+    try:
+        admin_db().storage.from_(PHRASE_BUCKET).upload(path, audio, {"content-type": "audio/mpeg", "upsert": "true"})
+        _stored_phrases.add(path)
+    except Exception:
+        logger.exception("Could not store examiner phrase")
 
 
 def speech_b64(text: str) -> str:
+    """Examiner audio: TTS, stored for reuse; if TTS is unavailable, the stored copy is used."""
     if text not in _tts_cache:
-        audio = synthesize_speech(text, voice=EXAMINER_VOICE, instructions=EXAMINER_STYLE)
+        try:
+            audio = synthesize_speech(text, voice=EXAMINER_VOICE, instructions=EXAMINER_STYLE)
+            threading.Thread(target=_store_phrase, args=(text, audio), daemon=True).start()
+        except Exception:
+            audio = admin_db().storage.from_(PHRASE_BUCKET).download(_phrase_path(text))  # raises if missing
         _tts_cache[text] = base64.b64encode(audio).decode()
         if len(_tts_cache) > 300:
             _tts_cache.pop(next(iter(_tts_cache)))
     return _tts_cache[text]
+
+
+def fixed_phrases(content: dict, parts: list[int]) -> list[str]:
+    """Every examiner line that can be said without the AI (used to pre-voice bank exams)."""
+    single = len(parts) == 1
+    q1 = (content.get("1") or {}).get("questions") or []
+    q3 = (content.get("3") or {}).get("questions") or []
+    out = [END_TEXT]
+    if 1 in parts and q1:
+        out.append("Good morning. My name is Daniel, and I'll be your examiner today. "
+                   "In this first part, I'd like to ask you some questions about yourself. " + q1[0])
+        out += q1[1:]
+    if 2 in parts:
+        out += [("Good morning. " if single else "") + PART2_INTRO, PART2_GO, ROUNDING_OFF_FALLBACK]
+    if 3 in parts:
+        lead = ("We've been talking about a topic from Part 2, and I'd like to discuss with you "
+                "one or two more general questions related to it. ") if not single else \
+               "In this part, I'd like to discuss some more general questions with you. "
+        out.append(lead + (q3[0] if q3 else "What do you think about this topic?"))
+        out += q3[1:] + ["Why do you think that is?"]
+    return out
+
+
+def prevoice(content: dict, parts: list[int]) -> None:
+    """Voice and store the fixed examiner lines in the background."""
+    def job():
+        for text in fixed_phrases(content, parts):
+            try:
+                _store_phrase(text, synthesize_speech(text, voice=EXAMINER_VOICE, instructions=EXAMINER_STYLE))
+            except Exception:
+                logger.exception("Could not pre-voice an examiner line")
+                return
+    threading.Thread(target=job, daemon=True).start()
 
 
 def public_turn(turn: dict) -> dict:

@@ -222,6 +222,7 @@
           <div id="ieltsBandCards" class="row g-3"></div>
           <div class="card-soft mt-4"><h5>AI study recommendation</h5><p id="ieltsRecommendation" class="mb-0"></p></div>
           <div class="card-soft mt-4"><h5>Recent IELTS practice</h5><div id="ieltsRecent"></div></div>
+          <div id="ieltsBankAdmin" class="mt-4"></div>
         </div>
 
         <div id="page-ielts-writing" class="page d-none">
@@ -276,11 +277,18 @@
     <h5>Start a new full mock</h5>
     <p class="text-secondary">Listening has 4 parts / 40 questions; Reading has 3 sections / 40 questions; Writing has 2 tasks; Speaking has 3 parts.</p>
     <div class="row g-2">
-      <div class="col-md-8">
+      <div class="col-md-4">
         <label class="form-label">Test type</label>
         <select id="mockTestType" class="form-select">
           <option>Academic</option>
           <option>General Training</option>
+        </select>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Exam paper</label>
+        <select id="mockSource" class="form-select">
+          <option value="new">New exam (AI-generated)</option>
+          <option value="verified">Verified exam from the bank</option>
         </select>
       </div>
       <div class="col-md-4 d-grid align-self-end">

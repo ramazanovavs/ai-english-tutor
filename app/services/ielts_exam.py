@@ -115,7 +115,8 @@ def load_audio(mock_id: str, part: int) -> bytes | None:
 
 # ---------------------------------------------------------------- preparation
 
-def prepare(mock_id: str, user_id: str, test_type: str, generators: dict, save_section, get_section) -> bool:
+def prepare(mock_id: str, user_id: str, test_type: str, generators: dict, save_section, get_section,
+            on_ready=None, on_error=None) -> bool:
     """Start background generation of everything that is still missing. Returns False if already running."""
     if mock_id in _preparing:
         return False
@@ -186,8 +187,23 @@ def prepare(mock_id: str, user_id: str, test_type: str, generators: dict, save_s
             set_prep(step="Speaking")
             with_retry(speaking_paper)
             set_prep(status="ready", step="Done")
+            if on_ready:
+                try:
+                    on_ready()
+                except Exception:
+                    logger.exception("Post-preparation step failed")
         except Exception as exc:
-            set_prep(status="error", error=str(exc))
+            # OpenAI unavailable or failing: complete the paper from the IELTS bank if possible.
+            recovered = False
+            if on_error:
+                try:
+                    recovered = bool(on_error())
+                except Exception:
+                    logger.exception("Backup paper could not be used")
+            if recovered:
+                set_prep(status="ready", step="Done", backup=True, error=None, listening_ready=True)
+            else:
+                set_prep(status="error", error=str(exc))
         finally:
             _preparing.discard(mock_id)
 
