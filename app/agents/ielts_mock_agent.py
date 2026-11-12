@@ -5,6 +5,7 @@ from app.agents.ielts_agent import EXAM_LEVEL
 from app.services.ielts_scoring import criterion, criteria_band
 from app.agents.ielts_visuals import CHART_SPEC, pick_type, clean_chart
 from app.agents.ielts_verify import verify as verify_key
+from app.agents.ielts_reading_types import GROUP_SPEC, clean_groups
 from app.agents.ielts_rubrics import SPEAKING_DESCRIPTORS, DATA_GUARD, learner_block, language_rule
 
 
@@ -142,11 +143,21 @@ answer_key maps each question id string to an array of accepted exact answers.
 Use a realistic mix of IELTS-style question types that work in plain text.
 For text-entry questions, state a strict word limit in instruction.
 Questions and keys must be unambiguous from the passage.
-"""
-    return verify_key(ask_json(
-        instructions,
-        f"Test type: {kind}\nReading section: {section}\n{EXAM_LEVEL}",
-    ), "passage", "passage")
+""" + GROUP_SPEC
+    required = ({1: "diagram_labelling", 2: "matching_headings", 3: "summary_completion"} if kind == "Academic"
+                else {1: None, 2: "matching_headings", 3: "summary_completion"})[section]
+    request = (f"Test type: {kind}\nReading section: {section}\n"
+               + (f"This section must include one \"{required}\" group of 5-7 questions.\n" if required else "")
+               + EXAM_LEVEL)
+    data = None
+    for attempt in range(2):
+        data = ask_json(instructions, request)
+        try:
+            data = clean_groups(data, required if attempt == 0 else None)
+            break
+        except ValueError:
+            data["groups"] = []
+    return verify_key(data, "passage", "passage")
 
 
 def generate_full_writing(test_type: str) -> dict:

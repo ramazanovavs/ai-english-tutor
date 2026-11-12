@@ -6,6 +6,8 @@ from app.services.openai_service import ask_json
 from app.services.ielts_scoring import criterion, criteria_band
 from app.agents.ielts_visuals import CHART_SPEC, pick_type, clean_chart, chart_as_text
 from app.agents.ielts_verify import verify as verify_key
+from app.agents.ielts_reading_types import GROUP_SPEC, clean_groups
+import random
 from app.agents.ielts_rubrics import (DATA_GUARD, WRITING_DESCRIPTORS, SPEAKING_DESCRIPTORS,
                                       learner_block, language_rule)
 
@@ -133,14 +135,25 @@ Because you only have a transcript, DO NOT score pronunciation. Criteria are who
 def generate_reading_practice(test_type: str) -> dict:
     instructions = """
 Create an original IELTS-style Reading practice set for study, not an official or copied test.
-Return JSON with exactly: title, passage, questions, answer_key, explanations.
+Return JSON with exactly: title, passage, questions, answer_key, explanations, groups.
 passage: 650-850 words for Academic; 500-700 words for General Training.
-questions: exactly 10 objects with id (1-10), type, question, options (array; empty if not MCQ).
+questions: exactly 10 objects with id (1-10), type, question, options (array; empty if not MCQ), instruction.
 Use a varied mix of multiple choice, true/false/not given, matching-style, and short-answer where practical in plain text.
 answer_key: object mapping string question ids to exact answers. explanations: object mapping ids to concise explanations.
-"""
+""" + GROUP_SPEC
     kind = "General Training" if test_type.lower().startswith("general") else "Academic"
-    return verify_key(ask_json(instructions, f"IELTS {kind}. {EXAM_LEVEL}"), "passage", "passage")
+    special = random.choice(["matching_headings", "summary_completion", "diagram_labelling"] if kind == "Academic"
+                            else ["matching_headings", "summary_completion"])
+    request = f"IELTS {kind}. Include one \"{special}\" group of 4-6 questions; the rest standard. {EXAM_LEVEL}"
+    data = None
+    for attempt in range(2):
+        data = ask_json(instructions, request)
+        try:
+            data = clean_groups(data, special if attempt == 0 else None)
+            break
+        except ValueError:
+            data["groups"] = []
+    return verify_key(data, "passage", "passage")
 
 
 def generate_listening_practice() -> dict:

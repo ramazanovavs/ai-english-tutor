@@ -944,12 +944,16 @@ async function startIELTSSpeaking() {
 
 function renderIELTSQuestions(containerId, data, section) {
   const passage = section === "reading" ? `<div class="card-soft mb-3"><h5>${esc(data.title)}</h5><div class="reading-passage">${esc(data.passage).replace(/\n/g,"<br>")}</div></div>` : `<div class="card-soft mb-3"><h5>${esc(data.title)}</h5><p class="text-secondary mb-0">Read the questions, then press Play. The recording is played once — answer while you listen.</p><div id="ieltsListenState" class="small text-secondary mt-1"></div></div>`;
-  const questions = (data.questions || []).map(q => {
+  const standard = q => {
     const opts = (q.options || []).filter(Boolean);
     const instr = q.instruction ? `<div class="small text-secondary mb-1">${esc(q.instruction)}</div>` : "";
     const input = opts.length ? opts.map((o,i)=>`<div class="form-check"><input class="form-check-input" type="radio" name="${section}q${q.id}" value="${esc(o)}" id="${section}q${q.id}_${i}"><label class="form-check-label" for="${section}q${q.id}_${i}">${esc(o)}</label></div>`).join("") : `<input class="form-control" name="${section}q${q.id}" placeholder="Your answer">`;
     return `<div class="card-soft my-3">${instr}<div class="fw-semibold mb-2">${esc(q.id)}. ${esc(q.question)}</div>${input}<div id="${section}fb${q.id}" class="mt-2"></div></div>`;
-  }).join("");
+  };
+  const questions = readingGroupsHTML(data, {
+    name: q => `${section}q${q.id}`, number: id => id, saved: () => "", standard,
+    fbId: q => `${section}fb${q.id}`,
+  });
   document.getElementById(containerId).innerHTML = passage + questions + `<button class="btn btn-primary" onclick="submitIELTSObjective('${section}')">Submit ${section}</button><div id="${section}SubmitResult" class="mt-3"></div>`;
 }
 
@@ -1014,7 +1018,8 @@ async function submitIELTSObjective(section) {
   (data.questions || []).forEach(q => {
     const radio = document.querySelector(`input[name="${section}q${q.id}"]:checked`);
     const text = document.querySelector(`input.form-control[name="${section}q${q.id}"]`);
-    answers[String(q.id)] = radio ? radio.value : (text ? text.value : "");
+    const sel = document.querySelector(`select[name="${section}q${q.id}"]`);
+    answers[String(q.id)] = radio ? radio.value : (sel ? sel.value : (text ? text.value : ""));
   });
   const resultId = `${section}SubmitResult`;
   document.getElementById(resultId).innerHTML = `<div class="loader">Scoring…</div>`;
@@ -1327,7 +1332,8 @@ function collectMockObjective(section) {
       const name = `mock_${section}_${p.part}_${q.id}`;
       const radio = document.querySelector(`input[name="${name}"]:checked`);
       const text = document.querySelector(`input[name="${name}"]:not([type="radio"])`);
-      partAnswers[String(q.id)] = radio ? radio.value : (text ? text.value.trim() : "");
+      const sel = document.querySelector(`select[name="${name}"]`);
+      partAnswers[String(q.id)] = radio ? radio.value : (sel ? sel.value : (text ? text.value.trim() : ""));
     }
     answers[String(p.part)] = partAnswers;
   }
@@ -1520,7 +1526,11 @@ function renderMockReading(d) {
           <h5>${esc(p.content.title || `Passage ${p.part}`)}</h5>
           <div class="mock-passage">${esc(p.content.passage || "").replace(/\n/g, "<br>")}</div></div></div>
         <div class="col-lg-6 mock-reading-questions">
-          ${(p.content.questions || []).map(q => mockQuestionHTML("reading", p.part, q, offset, p.answers)).join("")}
+          ${(o => readingGroupsHTML(p.content, {
+              name: q => `mock_reading_${p.part}_${q.id}`, number: id => o + Number(id),
+              saved: id => p.answers?.[String(id)], fbId: () => "",
+              standard: q => mockQuestionHTML("reading", p.part, q, o, p.answers),
+            }, o))(offset)}
         </div>
       </div></div>`;
     offset += (p.content.questions || []).length;
@@ -2512,4 +2522,78 @@ async function viewBankItem(id) {
   cell.innerHTML = `<div class="p-2 border rounded bg-light">${html}</div>`;
   if (it.kind === "mock" && c.writing?.["1"]?.chart) renderTask1Chart(`bankChart_${id}_1`, c.writing["1"].chart);
   if (it.bank_key.startsWith("writing") && c.chart) renderTask1Chart(`bankChart_${id}_1`, c.chart);
+}
+
+
+/* ===================== IELTS Reading: grouped question types ===================== */
+// Matching Headings, Summary completion with a word bank and Diagram labelling share material
+// (headings list, summary with gaps, diagram); it is shown once above the group's questions.
+
+function readingAdjustNumbers(text, offset) {
+  if (!offset) return text;
+  return String(text || "").replace(/(Questions?\s+)(\d+)(\s*(?:-|–|to|and)\s*)(\d+)/gi,
+    (m, a, x, sep, y) => `${a}${offset + Number(x)}${sep}${offset + Number(y)}`);
+}
+
+function readingSelectHTML(name, q, saved, number, fbId) {
+  const value = saved ?? "";
+  const opts = (q.options || []).map(o => `<option value="${esc(o)}" ${value === o ? "selected" : ""}>${esc(String(o).split(/[.)]\s*/)[0])}</option>`).join("");
+  return `<div class="mock-question d-flex align-items-center gap-2 flex-wrap">
+    <span class="mock-qnum">${number}</span><span>${esc(q.question)}</span>
+    <select class="form-select form-select-sm reading-select" name="${name}"><option value="">—</option>${opts}</select>
+    ${fbId ? `<div id="${fbId}" class="w-100"></div>` : ""}</div>`;
+}
+
+function readingDiagramSVG(diagram, numberOf) {
+  const cw = 64, ch = 46, W = 10 * cw + 10, H = 8 * ch + 10;
+  const parts = diagram.parts || [];
+  const center = p => [5 + (p.x + p.w / 2) * cw, 5 + (p.y + p.h / 2) * ch];
+  let out = (diagram.links || []).map(([a, b]) => {
+    if (!parts[a] || !parts[b]) return "";
+    const [x1, y1] = center(parts[a]), [x2, y2] = center(parts[b]);
+    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#888" stroke-width="1.5"/>`;
+  }).join("");
+  parts.forEach(p => {
+    const x = 5 + p.x * cw, y = 5 + p.y * ch, w = p.w * cw - 6, h = p.h * ch - 6;
+    const label = p.gap != null ? `(${numberOf(p.gap)}) ________` : p.text;
+    out += `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="6" fill="${p.gap != null ? "#fff8e1" : "#eef1ff"}" stroke="#5b5bd6"/>
+      <text x="${x + w / 2}" y="${y + h / 2 + 4}" font-size="12" text-anchor="middle" font-weight="${p.gap != null ? 700 : 400}">${esc(label)}</text>`;
+  });
+  return `<div class="t1-visual mb-2">${diagram.title ? `<div class="fw-semibold text-center mb-1">${esc(diagram.title)}</div>` : ""}
+    <svg viewBox="0 0 ${W} ${H}" class="t1-svg">${out}</svg></div>`;
+}
+
+// ctx: {name(q), number(qid), saved(qid), standard(q) -> html, fbId(q) -> id or ""}
+function readingGroupsHTML(content, ctx, offset = 0) {
+  const questions = content.questions || [];
+  const byId = Object.fromEntries(questions.map(q => [String(q.id), q]));
+  const used = new Set();
+  let html = "";
+  for (const g of (content.groups || [])) {
+    const ids = (g.question_ids || []).map(String).filter(id => byId[id]);
+    if (!ids.length) continue;
+    ids.forEach(id => used.add(id));
+    let shared = "";
+    if (g.type === "matching_headings") {
+      shared = `<div class="reading-box"><div class="fw-semibold mb-1">List of Headings</div>${(g.options || []).map(o => `<div>${esc(o)}</div>`).join("")}</div>`;
+    } else if (g.type === "summary_completion") {
+      const summary = esc(g.summary || "").replace(/\[Q(\d+)\]/g, (m, id) => `<strong>(${ctx.number(id)})</strong>&nbsp;________`);
+      shared = `<div class="reading-box mb-2">${summary}</div>
+        <div class="reading-box"><div class="fw-semibold mb-1">Word bank</div>${(g.options || []).map(o => `<span class="me-3 d-inline-block">${esc(o)}</span>`).join("")}</div>`;
+    } else if (g.type === "diagram_labelling" && g.diagram) {
+      shared = readingDiagramSVG(g.diagram, ctx.number);
+    }
+    const qs = ids.map(id => {
+      const q = byId[id];
+      if (g.type === "matching_headings" || g.type === "summary_completion") {
+        return readingSelectHTML(ctx.name(q), q, ctx.saved(id), ctx.number(id), ctx.fbId(q));
+      }
+      return ctx.standard(q);
+    }).join("");
+    html += `<div class="reading-group mb-3">
+      ${g.instruction ? `<div class="small fw-semibold text-secondary mb-2">${esc(readingAdjustNumbers(g.instruction, offset))}</div>` : ""}
+      ${shared}${qs}</div>`;
+  }
+  html += questions.filter(q => !used.has(String(q.id))).map(q => ctx.standard(q)).join("");
+  return html;
 }

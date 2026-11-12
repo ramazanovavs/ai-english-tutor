@@ -1356,7 +1356,7 @@ def ielts_reading_generate(payload: IELTSPracticeGeneratePayload, user=Depends(r
         notice = f"{AI_DOWN} This is a ready-made practice set from the bank."
     test_id = _ielts_practice_store(user, "reading", test_type, content)
     return {"test_id": test_id, "title": content.get("title"), "passage": content.get("passage"),
-            "questions": _ielts_public_questions(content), "notice": notice}
+            "questions": _ielts_public_questions(content), "groups": content.get("groups") or [], "notice": notice}
 
 
 @router.post("/ielts/listening/generate")
