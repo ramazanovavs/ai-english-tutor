@@ -25,6 +25,8 @@ from app.config import get_settings
 from app.agents.assessment_agent import generate as generate_test
 from app.services.openai_service import ask_text, ask_json, transcribe_audio, synthesize_speech
 from app.services.ielts_scoring import overall_band as ielts_overall_band, writing_band as ielts_writing_band
+from app.services import ielts_exam
+import threading
 from app.agents.ielts_agent import (
     generate_writing_prompt as ielts_generate_writing_prompt,
     assess_writing as ielts_assess_writing,
@@ -1194,42 +1196,35 @@ def ielts_objective_submit(payload: IELTSObjectiveSubmitPayload, user=Depends(re
     }
 
 
-# ========================= FULL IELTS MOCK EXAM =========================
+# ========================= FULL IELTS MOCK EXAM (computer-delivered format) =========================
 
 class IELTSMockStartPayload(BaseModel):
     test_type: str = "Academic"
 
 
-class IELTSMockGeneratePayload(BaseModel):
-    section: str
-    part: int = Field(ge=1, le=4)
+class IELTSMockSectionPayload(BaseModel):
+    section: Literal["listening", "reading", "writing", "speaking"]
 
 
-class IELTSMockObjectiveSubmitPayload(BaseModel):
-    section: str
-    part: int = Field(ge=1, le=4)
-    answers: dict[str, str]
-
-
-class IELTSMockWritingSubmitPayload(BaseModel):
-    task1_response: str = Field(min_length=20, max_length=20000)
-    task2_response: str = Field(min_length=20, max_length=30000)
+class IELTSMockAnswersPayload(BaseModel):
+    section: Literal["listening", "reading", "writing"]
+    # listening/reading: {"1": {"1": "answer", ...}, "2": {...}}; writing: {"1": "text", "2": "text"}
+    answers: dict
 
 
 class IELTSMockSpeakingSubmitPayload(BaseModel):
     transcripts: dict[str, str]
 
 
+_MOCK_HIDDEN = {"answer_key", "explanations", "audio_script", "script", "speakers", "intro"}
+
+
 def _mock_safe_content(section: str, content: dict) -> dict:
-    hidden = {"answer_key", "explanations", "audio_script"}
-    return {k: v for k, v in content.items() if k not in hidden}
+    return {k: v for k, v in (content or {}).items() if k not in _MOCK_HIDDEN}
 
 
 def _mock_match_answer(given: str, accepted) -> bool:
-    g = _normalize_answer(given)
-    if isinstance(accepted, list):
-        return any(g == _normalize_answer(x) for x in accepted)
-    return g == _normalize_answer(accepted)
+    return ielts_exam.is_correct(given, accepted)
 
 
 def _mock_band_from_raw(section: str, raw: int, test_type: str) -> float:
@@ -1259,223 +1254,255 @@ def _mock_band_from_raw(section: str, raw: int, test_type: str) -> float:
     return 1.0
 
 
-@router.post("/ielts/mock/start")
-def ielts_mock_start(payload: IELTSMockStartPayload, user=Depends(require_user)):
-    ensure_profile(user["id"], user.get("email"))
-    ensure_ielts_profile(user["id"])
-    test_type = "General Training" if payload.test_type.lower().startswith("general") else "Academic"
-    row = mock_start(user["id"], test_type)
-    return {
-        "mock_id": row["id"],
-        "test_type": test_type,
-        "status": row["status"],
-    }
+_MOCK_GENERATORS = {
+    "listening": mock_generate_listening_part,
+    "reading": mock_generate_reading_section,
+    "writing": mock_generate_full_writing,
+    "speaking": mock_generate_full_speaking,
+}
 
 
-@router.get("/ielts/mock/{mock_id}")
-def ielts_mock_status(mock_id: str, user=Depends(require_user)):
+def _mock_or_404(user: dict, mock_id: str) -> dict:
     try:
         return mock_get(user["id"], mock_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="Mock exam not found.")
 
 
-@router.post("/ielts/mock/{mock_id}/generate")
-def ielts_mock_generate(mock_id: str, payload: IELTSMockGeneratePayload, user=Depends(require_user)):
+def _mock_section_done(mock: dict, section: str) -> bool:
+    done = [s for s in mock.get("sections", []) if s["section"] == section and s["status"] == "completed"]
+    return len(done) >= ielts_exam.PARTS[section]
+
+
+def _mock_start_prep(user: dict, mock: dict) -> None:
+    ielts_exam.prepare(
+        mock["id"], user["id"], mock.get("test_type") or "Academic",
+        _MOCK_GENERATORS, mock_save_generated_section, mock_get_section,
+    )
+
+
+def _mock_finalize_objective(user_id: str, mock: dict, section: str, submitted: dict | None = None) -> None:
+    """Mark Listening/Reading from the saved answers (merged with a timely submission)."""
+    mock_id = mock["id"]
+    test_type = mock.get("test_type") or "Academic"
+    raw_total, total, review = 0, 0, {}
+    for part in range(1, ielts_exam.PARTS[section] + 1):
+        row = mock_get_section(user_id, mock_id, section, part)
+        if not row:
+            continue
+        answers = dict(row.get("answers") or {})
+        if submitted and isinstance(submitted.get(str(part)), dict):
+            answers.update({str(k): str(v) for k, v in submitted[str(part)].items()})
+        correct, details = ielts_exam.mark_part(row.get("content") or {}, answers)
+        raw_total += correct
+        total += len(details)
+        review[str(part)] = details
+        mock_complete_section(user_id, mock_id, section, part, answers=answers, raw_score=correct,
+                              total_questions=len(details), result={"details": details})
+    band = _mock_band_from_raw(section, raw_total, test_type)
+    mock_update_band(user_id, mock_id, section, band)
+    save_ielts_objective(user_id, section, test_type, f"Full IELTS Mock {section.title()}",
+                         round(raw_total / max(total, 1) * 100), band, {"raw_score": raw_total},
+                         [{"raw_score": raw_total, "total": total}])
+
+
+def _mock_assess_writing(user_id: str, mock_id: str, test_type: str) -> None:
+    def blank():
+        return {"task_achievement": 0, "task_response": 0, "coherence_cohesion": 0, "lexical_resource": 0,
+                "grammatical_range_accuracy": 0, "overall_band": 0.0, "word_count": 0,
+                "strengths": [], "improvements": [{"criterion": "Task", "issue": "No answer was written.",
+                                                   "action": "Always write a response to both tasks."}]}
     try:
-        mock = mock_get(user["id"], mock_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Mock exam not found.")
+        results = {}
+        for task in (1, 2):
+            row = mock_get_section(user_id, mock_id, "writing", task)
+            text = str((row.get("answers") or {}).get("response") or "").strip()
+            results[task] = (ielts_assess_writing(test_type, task, row["content"]["prompt"], text)
+                             if len(text.split()) >= 20 else blank())
+            mock_complete_section(user_id, mock_id, "writing", task, estimated_band=results[task]["overall_band"],
+                                  result=results[task])
+            save_ielts_writing(user_id, test_type, task, row["content"]["prompt"], text or "(no answer)", results[task])
+        band = ielts_writing_band(results[1]["overall_band"], results[2]["overall_band"])
+        mock_update_band(user_id, mock_id, "writing", band)
+        ielts_exam.update_meta(mock_id, lambda m: m.update(writing_assessment="done"))
+    except Exception as exc:
+        logger.exception("Mock writing assessment failed")
+        ielts_exam.update_meta(mock_id, lambda m: m.update(writing_assessment="error", writing_error=str(exc)))
+
+
+def _mock_finalize_expired(user: dict, mock: dict) -> dict:
+    """If the learner left during a timed section, mark it from the saved answers after the deadline."""
+    meta = mock.get("metadata") or {}
+    changed = False
+    for section in ("listening", "reading"):
+        if (section in (meta.get("timing") or {}) and not _mock_section_done(mock, section)
+                and ielts_exam.deadline_passed(meta, section, ielts_exam.SUBMIT_GRACE)):
+            _mock_finalize_objective(user["id"], mock, section)
+            changed = True
+    if ("writing" in (meta.get("timing") or {}) and not meta.get("writing_assessment")
+            and ielts_exam.deadline_passed(meta, "writing", ielts_exam.SUBMIT_GRACE)):
+        _mock_submit_writing(user, mock, None)
+        changed = True
+    return mock_get(user["id"], mock["id"]) if changed else mock
+
+
+def _mock_submit_writing(user: dict, mock: dict, texts: dict | None) -> None:
+    for task in (1, 2):
+        row = mock_get_section(user["id"], mock["id"], "writing", task)
+        saved = str((row.get("answers") or {}).get("response") or "")
+        text = str((texts or {}).get(str(task), saved))
+        mock_complete_section(user["id"], mock["id"], "writing", task, answers={"response": text})
+    ielts_exam.update_meta(mock["id"], lambda m: m.update(writing_assessment="running"))
+    threading.Thread(target=_mock_assess_writing,
+                     args=(user["id"], mock["id"], mock.get("test_type") or "Academic"), daemon=True).start()
+
+
+def _mock_status_payload(mock: dict) -> dict:
+    meta = mock.get("metadata") or {}
+    next_section = next((s for s in ielts_exam.ORDER if not _mock_section_done(mock, s)), "results")
+    if next_section == "writing" and meta.get("writing_assessment"):
+        next_section = "speaking"
+    return {
+        "mock_id": mock["id"],
+        "test_type": mock.get("test_type"),
+        "status": mock.get("status"),
+        "version": meta.get("version"),
+        "prep": meta.get("prep") or {},
+        "preparing": ielts_exam.is_preparing(mock["id"]),
+        "timing": meta.get("timing") or {},
+        "listening_plan": ielts_exam.listening_plan(meta.get("listening_durations") or {})
+            if len(meta.get("listening_durations") or {}) == 4 else None,
+        "listening_served": meta.get("listening_served") or {},
+        "writing_assessment": meta.get("writing_assessment"),
+        "next_section": next_section,
+        "server_time": ielts_exam.iso(ielts_exam.now()),
+    }
+
+
+@router.post("/ielts/mock/start")
+def ielts_mock_start(payload: IELTSMockStartPayload, user=Depends(require_user)):
+    ensure_profile(user["id"], user.get("email"))
+    ensure_ielts_profile(user["id"])
+    test_type = "General Training" if payload.test_type.lower().startswith("general") else "Academic"
+    row = mock_start(user["id"], test_type)
+    ielts_exam.update_meta(row["id"], lambda m: m.update(version=ielts_exam.VERSION, prep={"status": "running"}))
+    mock = mock_get(user["id"], row["id"])
+    _mock_start_prep(user, mock)
+    return _mock_status_payload(mock_get(user["id"], row["id"]))
+
+
+@router.get("/ielts/mock/{mock_id}")
+def ielts_mock_status(mock_id: str, user=Depends(require_user)):
+    mock = _mock_or_404(user, mock_id)
+    if mock.get("status") == "in_progress" and (mock.get("metadata") or {}).get("version") == ielts_exam.VERSION:
+        mock = _mock_finalize_expired(user, mock)
+    return _mock_status_payload(mock)
+
+
+@router.post("/ielts/mock/{mock_id}/prepare")
+def ielts_mock_prepare(mock_id: str, user=Depends(require_user)):
+    """Resume preparation after an error or a server restart."""
+    mock = _mock_or_404(user, mock_id)
+    _mock_start_prep(user, mock)
+    return _mock_status_payload(mock_get(user["id"], mock_id))
+
+
+@router.post("/ielts/mock/{mock_id}/abandon")
+def ielts_mock_abandon(mock_id: str, user=Depends(require_user)):
+    _mock_or_404(user, mock_id)
+    admin_db().table("ielts_mock_tests").update({"status": "abandoned"}).eq("id", mock_id).eq("user_id", user["id"]).execute()
+    return {"ok": True}
+
+
+@router.post("/ielts/mock/{mock_id}/section/start")
+def ielts_mock_section_start(mock_id: str, payload: IELTSMockSectionPayload, user=Depends(require_user)):
+    mock = _mock_or_404(user, mock_id)
     if mock.get("status") != "in_progress":
         raise HTTPException(status_code=400, detail="This mock exam is not active.")
+    mock = _mock_finalize_expired(user, mock)
+    section = payload.section
+    status = _mock_status_payload(mock)
+    if status["next_section"] != section:
+        raise HTTPException(status_code=409, detail=f"The next section is {status['next_section']}.")
 
-    section = payload.section.lower().strip()
-    part = payload.part
-    existing = mock_get_section(user["id"], mock_id, section, part)
-    if existing and section in {"listening", "reading"}:
-        mock_start_section(user["id"], mock_id, section, part)
-        return {
-            "section": section,
-            "part": part,
-            "content": _mock_safe_content(section, existing.get("content") or {}),
-        }
+    rows = [mock_get_section(user["id"], mock_id, section, p) for p in range(1, ielts_exam.PARTS[section] + 1)]
+    meta = mock.get("metadata") or {}
+    if section == "listening" and len(meta.get("listening_durations") or {}) < 4:
+        rows = [None]
+    if not all(rows):
+        if not ielts_exam.is_preparing(mock_id):
+            _mock_start_prep(user, mock)
+        raise HTTPException(status_code=409, detail="The exam paper is still being prepared. Please wait a moment.")
 
-    test_type = mock.get("test_type") or "Academic"
-
-    if section == "listening":
-        if part not in (1, 2, 3, 4):
-            raise HTTPException(status_code=400, detail="Listening has Parts 1-4.")
-        content = mock_generate_listening_part(part)
-    elif section == "reading":
-        if part not in (1, 2, 3):
-            raise HTTPException(status_code=400, detail="Reading has Sections 1-3.")
-        content = mock_generate_reading_section(test_type, part)
-    elif section == "writing":
-        if part != 1:
-            raise HTTPException(status_code=400, detail="Generate Writing with part=1.")
-        t1_existing = mock_get_section(user["id"], mock_id, "writing", 1)
-        t2_existing = mock_get_section(user["id"], mock_id, "writing", 2)
-        if t1_existing and t2_existing:
-            mock_start_section(user["id"], mock_id, "writing", 1)
-            mock_start_section(user["id"], mock_id, "writing", 2)
-            return {
-                "section": "writing",
-                "content": {"task1": t1_existing["content"], "task2": t2_existing["content"]},
-            }
-        paper = mock_generate_full_writing(test_type)
-        for task_no, key in ((1, "task1"), (2, "task2")):
-            mock_save_generated_section(user["id"], mock_id, "writing", task_no, paper[key])
-            mock_start_section(user["id"], mock_id, "writing", task_no)
-        return {"section": "writing", "content": paper}
-    elif section == "speaking":
-        if part != 1:
-            raise HTTPException(status_code=400, detail="Generate Speaking with part=1.")
-        existing_parts = [mock_get_section(user["id"], mock_id, "speaking", p) for p in (1, 2, 3)]
-        if all(existing_parts):
-            for p in (1, 2, 3):
-                mock_start_section(user["id"], mock_id, "speaking", p)
-            return {
-                "section": "speaking",
-                "content": {
-                    "part1": existing_parts[0]["content"],
-                    "part2": existing_parts[1]["content"],
-                    "part3": existing_parts[2]["content"],
-                },
-            }
-        paper = mock_generate_full_speaking()
-        for pno, key in ((1, "part1"), (2, "part2"), (3, "part3")):
-            mock_save_generated_section(user["id"], mock_id, "speaking", pno, paper[key])
-            mock_start_section(user["id"], mock_id, "speaking", pno)
-        return {"section": "speaking", "content": paper}
-    else:
-        raise HTTPException(status_code=400, detail="Unknown mock section.")
-
-    row = mock_save_generated_section(user["id"], mock_id, section, part, content)
-    mock_start_section(user["id"], mock_id, section, part)
-    return {"section": section, "part": part, "content": _mock_safe_content(section, row["content"])}
+    timing = ielts_exam.start_timer(mock_id, section)
+    for p in range(1, len(rows) + 1):
+        if rows[p - 1].get("status") == "ready":
+            mock_start_section(user["id"], mock_id, section, p)
+    parts = [{
+        "part": p,
+        "content": _mock_safe_content(section, rows[p - 1].get("content") or {}),
+        "answers": rows[p - 1].get("answers") or {},
+    } for p in range(1, len(rows) + 1)]
+    result = _mock_status_payload(mock_get(user["id"], mock_id))
+    result.update(section=section, timing=timing, parts=parts)
+    return result
 
 
 @router.get("/ielts/mock/{mock_id}/listening/{part}/audio")
 def ielts_mock_listening_audio(mock_id: str, part: int, user=Depends(require_user)):
-    row = mock_get_section(user["id"], mock_id, "listening", part)
-    if not row:
-        raise HTTPException(status_code=404, detail="Generate this Listening part first.")
-    script = (row.get("content") or {}).get("audio_script")
-    if not script:
-        raise HTTPException(status_code=404, detail="Listening script is unavailable.")
-    audio_bytes = synthesize_speech(
-        script,
-        instructions=(
-            "Read this as a natural IELTS-style listening recording at a normal exam pace. "
-            "Use natural intonation and subtle changes of delivery when the text contains more than one speaker."
-        ),
-    )
-    return StreamingResponse(
-        BytesIO(audio_bytes),
-        media_type="audio/mpeg",
-        headers={"Cache-Control": "no-store"},
-    )
+    mock = _mock_or_404(user, mock_id)
+    meta = mock.get("metadata") or {}
+    if "listening" not in (meta.get("timing") or {}) or _mock_section_done(mock, "listening"):
+        raise HTTPException(status_code=403, detail="The Listening test is not in progress.")
+    if part not in (1, 2, 3, 4):
+        raise HTTPException(status_code=404, detail="Listening has Parts 1-4.")
+    if not ielts_exam.mark_audio_served(mock_id, part):
+        raise HTTPException(status_code=403, detail="In the exam each recording is played only once.")
+    audio = ielts_exam.load_audio(mock_id, part)
+    if not audio:
+        raise HTTPException(status_code=503, detail="The recording is unavailable. Please contact the administrator.")
+    return StreamingResponse(BytesIO(audio), media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
 
 
-@router.post("/ielts/mock/{mock_id}/objective/submit")
-def ielts_mock_objective_submit(mock_id: str, payload: IELTSMockObjectiveSubmitPayload, user=Depends(require_user)):
-    section = payload.section.lower().strip()
-    if section not in {"listening", "reading"}:
-        raise HTTPException(status_code=400, detail="Objective section must be listening or reading.")
-    row = mock_get_section(user["id"], mock_id, section, payload.part)
-    if not row:
-        raise HTTPException(status_code=404, detail="Generate this section first.")
-
-    content = row.get("content") or {}
-    key = content.get("answer_key") or {}
-    explanations = content.get("explanations") or {}
-    details, correct = [], 0
-    for q in content.get("questions") or []:
-        qid = str(q.get("id"))
-        given = payload.answers.get(qid, "")
-        accepted = key.get(qid, [])
-        ok = _mock_match_answer(given, accepted)
-        correct += int(ok)
-        details.append({
-            "id": qid,
-            "correct": ok,
-            "answer": given,
-            "accepted": accepted,
-            "explanation": explanations.get(qid, ""),
-        })
-
-    total = len(content.get("questions") or [])
-    mock_complete_section(
-        user["id"], mock_id, section, payload.part,
-        answers=payload.answers, raw_score=correct, total_questions=total,
-        result={"details": details},
-    )
-
-    mock = mock_get(user["id"], mock_id)
-    expected_parts = 4 if section == "listening" else 3
-    completed = [x for x in mock.get("sections", []) if x["section"] == section and x["status"] == "completed"]
-    section_band = None
-    raw_total = sum(int(x.get("raw_score") or 0) for x in completed)
-    question_total = sum(int(x.get("total_questions") or 0) for x in completed)
-    if len(completed) == expected_parts and question_total == 40:
-        section_band = _mock_band_from_raw(section, raw_total, mock.get("test_type") or "Academic")
-        mock_update_band(user["id"], mock_id, section, section_band)
-        save_ielts_objective(
-            user["id"], section, mock.get("test_type") or "Academic",
-            f"Full IELTS Mock {section.title()}", round(raw_total / 40 * 100),
-            section_band, {"raw_score": raw_total}, [{"parts_completed": expected_parts}],
-        )
-
-    return {
-        "part_raw_score": correct,
-        "part_total": total,
-        "details": details,
-        "section_raw_score": raw_total,
-        "section_total": question_total,
-        "section_band": section_band,
-        "band_note": "Practice conversion. Official raw-score cut-offs can vary slightly between test versions.",
-    }
+@router.post("/ielts/mock/{mock_id}/answers")
+def ielts_mock_save_answers(mock_id: str, payload: IELTSMockAnswersPayload, user=Depends(require_user)):
+    """Autosave while the section is running; the server marks these if time runs out."""
+    mock = _mock_or_404(user, mock_id)
+    meta = mock.get("metadata") or {}
+    section = payload.section
+    if (section not in (meta.get("timing") or {}) or _mock_section_done(mock, section)
+            or (section == "writing" and meta.get("writing_assessment"))
+            or ielts_exam.deadline_passed(meta, section, ielts_exam.SUBMIT_GRACE)):
+        return {"saved": False}
+    for part, value in (payload.answers or {}).items():
+        if not str(part).isdigit() or not 1 <= int(part) <= ielts_exam.PARTS[section]:
+            continue
+        answers = {"response": str(value)[:30000]} if section == "writing" else \
+            {str(k): str(v)[:200] for k, v in (value or {}).items()}
+        (admin_db().table("ielts_mock_sections").update({"answers": answers})
+         .eq("mock_id", mock_id).eq("user_id", user["id"]).eq("section", section).eq("part", int(part)).execute())
+    return {"saved": True, "server_time": ielts_exam.iso(ielts_exam.now())}
 
 
-@router.post("/ielts/mock/{mock_id}/writing/submit")
-def ielts_mock_writing_submit(mock_id: str, payload: IELTSMockWritingSubmitPayload, user=Depends(require_user)):
-    mock = mock_get(user["id"], mock_id)
-    t1 = mock_get_section(user["id"], mock_id, "writing", 1)
-    t2 = mock_get_section(user["id"], mock_id, "writing", 2)
-    if not t1 or not t2:
-        raise HTTPException(status_code=404, detail="Generate the Writing paper first.")
-
-    r1 = ielts_assess_writing(mock["test_type"], 1, t1["content"]["prompt"], payload.task1_response)
-    r2 = ielts_assess_writing(mock["test_type"], 2, t2["content"]["prompt"], payload.task2_response)
-    b1 = float(r1.get("overall_band") or 0)
-    b2 = float(r2.get("overall_band") or 0)
-    writing_band = ielts_writing_band(b1, b2)
-
-    mock_complete_section(user["id"], mock_id, "writing", 1, answers={"response": payload.task1_response}, estimated_band=b1, result=r1)
-    mock_complete_section(user["id"], mock_id, "writing", 2, answers={"response": payload.task2_response}, estimated_band=b2, result=r2)
-    mock_update_band(user["id"], mock_id, "writing", writing_band)
-
-    save_ielts_writing(user["id"], mock["test_type"], 1, t1["content"]["prompt"], payload.task1_response, r1)
-    save_ielts_writing(user["id"], mock["test_type"], 2, t2["content"]["prompt"], payload.task2_response, r2)
-
-    db = admin_db()
-    db.table("ielts_profiles").update({"writing_band": writing_band}).eq("user_id", user["id"]).execute()
-    db.table("ielts_band_history").insert({
-        "user_id": user["id"], "section": "writing", "band": writing_band,
-        "source": "full_mock_ai_practice", "note": "Task 2 weighted twice Task 1."
-    }).execute()
-
-    return {
-        "task1": r1,
-        "task2": r2,
-        "writing_band": writing_band,
-        "disclaimer": "AI formative estimate only; official IELTS Writing is scored by certified examiners.",
-    }
+@router.post("/ielts/mock/{mock_id}/section/submit")
+def ielts_mock_section_submit(mock_id: str, payload: IELTSMockAnswersPayload, user=Depends(require_user)):
+    mock = _mock_or_404(user, mock_id)
+    meta = mock.get("metadata") or {}
+    section = payload.section
+    if section not in (meta.get("timing") or {}):
+        raise HTTPException(status_code=400, detail="This section has not started.")
+    late = ielts_exam.deadline_passed(meta, section, ielts_exam.SUBMIT_GRACE)
+    if section in ("listening", "reading"):
+        if not _mock_section_done(mock, section):
+            _mock_finalize_objective(user["id"], mock, section, None if late else payload.answers)
+    elif not meta.get("writing_assessment"):
+        _mock_submit_writing(user, mock, None if late else payload.answers)
+    return _mock_status_payload(mock_get(user["id"], mock_id))
 
 
 @router.post("/ielts/mock/{mock_id}/speaking/submit")
 def ielts_mock_speaking_submit(mock_id: str, payload: IELTSMockSpeakingSubmitPayload, user=Depends(require_user)):
-    mock = mock_get(user["id"], mock_id)
+    mock = _mock_or_404(user, mock_id)
     parts = {}
     for p in (1, 2, 3):
         row = mock_get_section(user["id"], mock_id, "speaking", p)
@@ -1491,49 +1518,57 @@ def ielts_mock_speaking_submit(mock_id: str, payload: IELTSMockSpeakingSubmitPay
         transcript = payload.transcripts[str(p)]
         mock_complete_section(user["id"], mock_id, "speaking", p, answers={"transcript": transcript}, estimated_band=band, result=result)
         save_ielts_speaking(user["id"], p, str(row["content"]), transcript, result)
-
     mock_update_band(user["id"], mock_id, "speaking", band)
-    db = admin_db()
-    db.table("ielts_profiles").update({"speaking_band": band}).eq("user_id", user["id"]).execute()
-    db.table("ielts_band_history").insert({
-        "user_id": user["id"], "section": "speaking", "band": band,
-        "source": "full_mock_transcript_practice",
-        "note": "Provisional transcript-only estimate; pronunciation not assessed."
-    }).execute()
-    return result
+    return _mock_status_payload(mock_get(user["id"], mock_id))
 
 
 @router.post("/ielts/mock/{mock_id}/finish")
 def ielts_mock_finish(mock_id: str, user=Depends(require_user)):
-    mock = mock_get(user["id"], mock_id)
-    bands = [
-        mock.get("listening_band"), mock.get("reading_band"),
-        mock.get("writing_band"), mock.get("speaking_band"),
-    ]
+    mock = _mock_or_404(user, mock_id)
+    meta = mock.get("metadata") or {}
+    if meta.get("writing_assessment") == "running":
+        raise HTTPException(status_code=202, detail="Writing is still being assessed. Please wait a moment.")
+    if meta.get("writing_assessment") == "error":
+        threading.Thread(target=_mock_assess_writing,
+                         args=(user["id"], mock_id, mock.get("test_type") or "Academic"), daemon=True).start()
+        ielts_exam.update_meta(mock_id, lambda m: m.update(writing_assessment="running"))
+        raise HTTPException(status_code=202, detail="Retrying the Writing assessment. Please wait a moment.")
+    bands = [mock.get("listening_band"), mock.get("reading_band"), mock.get("writing_band"), mock.get("speaking_band")]
     if any(x is None for x in bands):
         raise HTTPException(status_code=400, detail="Complete all four IELTS sections before finishing the mock.")
     overall = ielts_overall_band([float(x) for x in bands])
-    finished = mock_finish(user["id"], mock_id, overall)
+    if mock.get("status") != "completed":
+        mock_finish(user["id"], mock_id, overall)
+        db = admin_db()
+        db.table("ielts_profiles").update({
+            "current_overall_band": overall,
+            "listening_band": float(bands[0]), "reading_band": float(bands[1]),
+            "writing_band": float(bands[2]), "speaking_band": float(bands[3]),
+        }).eq("user_id", user["id"]).execute()
+        db.table("ielts_band_history").insert({
+            "user_id": user["id"], "section": "overall", "band": overall,
+            "source": "full_mock_ai_practice",
+            "note": "Practice overall uses transcript-only provisional Speaking; pronunciation was not assessed.",
+        }).execute()
 
-    db = admin_db()
-    db.table("ielts_profiles").update({
-        "current_overall_band": overall,
-        "listening_band": float(bands[0]),
-        "reading_band": float(bands[1]),
-        "writing_band": float(bands[2]),
-        "speaking_band": float(bands[3]),
-    }).eq("user_id", user["id"]).execute()
-    db.table("ielts_band_history").insert({
-        "user_id": user["id"], "section": "overall", "band": overall,
-        "source": "full_mock_ai_practice",
-        "note": "Practice overall uses transcript-only provisional Speaking; pronunciation was not assessed."
-    }).execute()
+    full = mock_get(user["id"], mock_id)
+    review = {}
+    for section in ("listening", "reading", "writing", "speaking"):
+        for p in range(1, ielts_exam.PARTS[section] + 1):
+            row = mock_get_section(user["id"], mock_id, section, p) or {}
+            review.setdefault(section, {})[str(p)] = {
+                "title": (row.get("content") or {}).get("title"),
+                "raw_score": row.get("raw_score"),
+                "total": row.get("total_questions"),
+                "band": row.get("estimated_band"),
+                "result": row.get("result") or {},
+                "transcript": (row.get("content") or {}).get("audio_script") if section == "listening" else None,
+            }
     return {
-        "mock": finished,
+        "mock": {k: full.get(k) for k in ("id", "test_type", "status", "started_at", "completed_at")},
         "overall_band": overall,
-        "bands": {
-            "listening": float(bands[0]), "reading": float(bands[1]),
-            "writing": float(bands[2]), "speaking": float(bands[3]),
-        },
+        "bands": {"listening": float(bands[0]), "reading": float(bands[1]),
+                  "writing": float(bands[2]), "speaking": float(bands[3])},
+        "review": review,
         "disclaimer": "Practice estimate only. This is not an official IELTS result; Speaking pronunciation is not assessed in transcript-only mode.",
     }

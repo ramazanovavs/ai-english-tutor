@@ -1045,17 +1045,36 @@ openPage = function(name) {
 
 
 
-// ========================= FULL IELTS MOCK EXAM =========================
-let fullMock = null;
+// ========================= FULL IELTS MOCK EXAM (computer-delivered format) =========================
+// Timing is kept on the server; this page only displays it. Answers are autosaved, and when a
+// section's time is up the saved answers are submitted automatically.
+
+let fullMock = null;            // last status from the server
+let mockSection = null;         // data of the running section
 let mockTimerHandle = null;
-let mockSecondsLeft = 0;
-let mockAudioPlayed = {};
+let mockClockOffset = 0;        // server time - local time (ms)
+let mockSaveTimer = null;
+let mockPollTimer = null;
+let mockAudioEl = null;         // one audio element, unlocked by the learner's click
+let mockListeningRun = 0;       // invalidates old Listening runners
+let mockSubmitting = false;
 let mockSpeakingRecorder = null;
 let mockSpeakingChunks = [];
 let mockSpeakingStream = null;
 
+const MOCK_SECTION_LABEL = {listening: "Listening", reading: "Reading", writing: "Writing", speaking: "Speaking"};
+
+function mockNow() { return Date.now() + mockClockOffset; }
+function mockSyncClock(serverTime) {
+  if (serverTime) mockClockOffset = new Date(serverTime).getTime() - Date.now();
+}
+function mockFmt(seconds) {
+  seconds = Math.max(0, Math.round(seconds));
+  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
 function setMockProgress(active) {
-  const order = ["listening","reading","writing","speaking","results"];
+  const order = ["listening", "reading", "writing", "speaking", "results"];
   const ai = order.indexOf(active);
   document.querySelectorAll(".mock-step").forEach(el => {
     const i = order.indexOf(el.dataset.mockStep);
@@ -1064,338 +1083,504 @@ function setMockProgress(active) {
   });
 }
 
-function startMockTimer(seconds) {
+// Countdown to a server deadline; calls onExpire once.
+function startMockDeadline(deadlineIso, onExpire, label = "Section time") {
   clearInterval(mockTimerHandle);
-  mockSecondsLeft = seconds;
   const el = document.getElementById("mockTimer");
+  document.getElementById("mockTimerLabel").textContent = label;
+  const deadline = new Date(deadlineIso).getTime();
+  let fired = false;
   const draw = () => {
-    const m = Math.floor(mockSecondsLeft / 60);
-    const s = mockSecondsLeft % 60;
-    el.textContent = `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
-    el.classList.toggle("time-low", mockSecondsLeft <= 300);
-    if (mockSecondsLeft <= 0) {
+    const left = (deadline - mockNow()) / 1000;
+    el.textContent = left > 0 ? mockFmt(left) : "TIME";
+    el.classList.toggle("time-low", left <= 300);
+    if (left <= 0 && !fired) {
+      fired = true;
       clearInterval(mockTimerHandle);
-      el.textContent = "TIME";
-      el.classList.add("time-low");
-      return;
+      onExpire?.();
     }
-    mockSecondsLeft -= 1;
   };
   draw();
   mockTimerHandle = setInterval(draw, 1000);
 }
 
+function stopMockTimers() {
+  clearInterval(mockTimerHandle);
+  clearTimeout(mockSaveTimer);
+  clearTimeout(mockPollTimer);
+  mockListeningRun++;
+  if (mockAudioEl) { try { mockAudioEl.pause(); } catch {} }
+}
+
+function showMockExam() {
+  document.getElementById("mockSetup").classList.add("d-none");
+  document.getElementById("mockExam").classList.remove("d-none");
+  document.getElementById("mockExamLabel").textContent = `${fullMock?.test_type || "IELTS"} · computer-delivered format`;
+}
+
 async function startFullIELTSMock() {
   const test_type = document.getElementById("mockTestType").value;
-  document.getElementById("mockSetup").innerHTML += `<div id="mockStartLoader" class="loader mt-3">Creating full mock exam…</div>`;
+  const btn = document.getElementById("mockStartBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "Starting…"; }
   try {
-    const d = await api("/api/ielts/mock/start", {
-      method:"POST",
-      body:JSON.stringify({test_type})
-    });
-    fullMock = {...d, currentSection:"listening"};
-    localStorage.setItem("activeIELTSMockId", d.mock_id);
-    document.getElementById("mockSetup").classList.add("d-none");
-    document.getElementById("mockExam").classList.remove("d-none");
-    document.getElementById("mockExamLabel").textContent = `${d.test_type} · computer-delivered format`;
-    setMockProgress("listening");
-    startMockTimer(30 * 60);
-    await loadMockObjectivePart("listening", 1);
-  } catch(e) {
-    document.getElementById("mockStartLoader")?.remove();
+    fullMock = await api("/api/ielts/mock/start", {method: "POST", body: JSON.stringify({test_type})});
+    mockSyncClock(fullMock.server_time);
+    localStorage.setItem("activeIELTSMockId", fullMock.mock_id);
+    showMockExam();
+    routeMock();
+  } catch (e) {
     alert(e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "Start full mock"; }
   }
 }
 
 async function resumeFullIELTSMock() {
   const id = localStorage.getItem("activeIELTSMockId");
-  if (!id || fullMock) return;
+  if (!id || mockSection) return;
   try {
     const d = await api(`/api/ielts/mock/${id}`);
-    if (d.status !== "in_progress") {
+    if (d.status !== "in_progress" && d.next_section !== "results") {
       localStorage.removeItem("activeIELTSMockId");
       return;
     }
-    fullMock = {
-      mock_id:id,
-      test_type:d.test_type,
-      status:d.status
-    };
-    document.getElementById("mockSetup").classList.add("d-none");
-    document.getElementById("mockExam").classList.remove("d-none");
-    document.getElementById("mockExamLabel").textContent = `${d.test_type} · computer-delivered format`;
-    const completed = d.sections || [];
-    const listeningDone = completed.filter(x=>x.section==="listening" && x.status==="completed").length;
-    const readingDone = completed.filter(x=>x.section==="reading" && x.status==="completed").length;
-    const writingDone = completed.filter(x=>x.section==="writing" && x.status==="completed").length;
-    const speakingDone = completed.filter(x=>x.section==="speaking" && x.status==="completed").length;
-    if (listeningDone < 4) {
-      setMockProgress("listening"); startMockTimer(30*60); await loadMockObjectivePart("listening", listeningDone+1);
-    } else if (readingDone < 3) {
-      setMockProgress("reading"); startMockTimer(60*60); await loadMockObjectivePart("reading", readingDone+1);
-    } else if (writingDone < 2) {
-      setMockProgress("writing"); startMockTimer(60*60); await loadMockWriting();
-    } else if (speakingDone < 3) {
-      setMockProgress("speaking"); startMockTimer(14*60); await loadMockSpeaking();
-    } else {
-      await finishFullIELTSMock();
+    if (d.version !== "cd_mock_v2") {
+      // A mock started before the exam-format update cannot continue in the new format.
+      await api(`/api/ielts/mock/${id}/abandon`, {method: "POST", body: "{}"}).catch(() => {});
+      localStorage.removeItem("activeIELTSMockId");
+      document.getElementById("mockSetup").insertAdjacentHTML("afterbegin",
+        `<div class="alert alert-info">Your previous mock used the old format and was closed. Please start a new one.</div>`);
+      return;
     }
-  } catch(e) {
+    fullMock = d;
+    mockSyncClock(d.server_time);
+    showMockExam();
+    routeMock();
+  } catch (e) {
     console.warn("Could not resume IELTS mock:", e);
   }
 }
 
-function mockQuestionHTML(section, part, q) {
-  const name = `mock_${section}_${part}_${q.id}`;
-  const opts = (q.options || []).filter(Boolean);
-  let control = "";
-  if (opts.length) {
-    control = opts.map((o,i)=>`
-      <div class="form-check">
-        <input class="form-check-input" type="radio" name="${name}" value="${esc(o)}" id="${name}_${i}">
-        <label class="form-check-label" for="${name}_${i}">${esc(o)}</label>
-      </div>`).join("");
-  } else {
-    control = `<input class="form-control" name="${name}" placeholder="Type your answer">`;
+async function refreshMockStatus() {
+  fullMock = await api(`/api/ielts/mock/${fullMock.mock_id}`);
+  mockSyncClock(fullMock.server_time);
+  return fullMock;
+}
+
+// Decide what to show next from the server status.
+function routeMock() {
+  stopMockTimers();
+  mockSection = null;
+  const next = fullMock.next_section;
+  setMockProgress(next);
+  if (next === "results") return finishFullIELTSMock();
+  if (fullMock.timing?.[next]) return showMockIntro(next, true);  // resume a running section
+  showMockIntro(next, false);
+}
+
+const MOCK_RULES = {
+  listening: [
+    "There are 4 parts and 40 questions. Each recording is played <strong>once only</strong>.",
+    "Before each part you have time to look at the questions; after Parts 1–3 you have 30 seconds to check.",
+    "At the end you have <strong>2 minutes</strong> to review your answers. Then they are submitted automatically.",
+    "Type answers directly into the boxes. Spelling counts; keep to the word limit in each instruction.",
+    "Use headphones and do not reload the page — a recording that has started cannot be replayed.",
+  ],
+  reading: [
+    "There are 3 passages and 40 questions. You have <strong>60 minutes</strong>; there is no extra transfer time.",
+    "Use the tabs to move between passages. Your answers are saved automatically.",
+    "When the time is up, your answers are submitted automatically.",
+  ],
+  writing: [
+    "There are 2 tasks. You have <strong>60 minutes</strong> in total. Spend about 20 minutes on Task 1 and 40 minutes on Task 2.",
+    "Task 1: at least 150 words. Task 2: at least 250 words. Task 2 counts twice as much as Task 1.",
+    "Your text is saved automatically and submitted when the time is up.",
+  ],
+  speaking: [
+    "The Speaking test has 3 parts and takes 11–14 minutes.",
+    "Record your answers aloud. They are transcribed and assessed together at the end.",
+  ],
+};
+
+function showMockIntro(section, resuming) {
+  const ws = document.getElementById("mockWorkspace");
+  document.getElementById("mockTimer").textContent = "--:--";
+  document.getElementById("mockTimerLabel").textContent = "Section time";
+  const prep = fullMock.prep || {};
+  const listeningReady = !!fullMock.listening_plan;
+  const notReady = section === "listening" && !listeningReady;
+  const prepLine = prep.status === "error"
+    ? `<div class="alert alert-danger">Preparation failed: ${esc(prep.error || "")}
+         <button class="btn btn-sm btn-outline-danger ms-2" onclick="retryMockPrep()">Try again</button></div>`
+    : (prep.status !== "ready"
+        ? `<div class="small text-secondary mb-3"><span class="spinner-border spinner-border-sm me-2"></span>
+             Preparing your exam paper in the background${prep.step ? ` · ${esc(prep.step)}` : ""}…</div>` : "");
+  ws.innerHTML = `
+    <div class="card-soft">
+      <h4>${esc(MOCK_SECTION_LABEL[section])}${resuming ? " · continue" : ""}</h4>
+      ${resuming
+        ? `<p>This section is already running on the server and its clock has not stopped. Press continue to return to it.</p>`
+        : `<ul>${MOCK_RULES[section].map(r => `<li class="mb-1">${r}</li>`).join("")}</ul>`}
+      ${prepLine}
+      <button id="mockEnterBtn" class="btn btn-primary" ${notReady ? "disabled" : ""}
+        onclick="enterMockSection('${section}')">${resuming ? "Continue" : `Start ${esc(MOCK_SECTION_LABEL[section])}`}</button>
+      ${notReady ? `<span class="small text-secondary ms-2">The recordings are being prepared…</span>` : ""}
+    </div>`;
+  if (prep.status !== "ready" && prep.status !== "error") {
+    mockPollTimer = setTimeout(async () => {
+      if (mockSection) return;
+      try { await refreshMockStatus(); } catch { return; }
+      if (!mockSection) showMockIntro(fullMock.next_section, !!fullMock.timing?.[fullMock.next_section]);
+    }, 4000);
   }
-  return `<div class="mock-question">
-    <div class="small text-secondary mb-1">${esc(q.type || "")}${q.instruction ? ` · ${esc(q.instruction)}` : ""}</div>
-    <div class="fw-semibold mb-2">${esc(q.id)}. ${esc(q.question)}</div>
+}
+
+async function retryMockPrep() {
+  fullMock = await api(`/api/ielts/mock/${fullMock.mock_id}/prepare`, {method: "POST", body: "{}"});
+  routeMock();
+}
+
+async function enterMockSection(section) {
+  const btn = document.getElementById("mockEnterBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "Opening…"; }
+  if (section === "listening") {
+    // Unlock audio with this click so later recordings may start automatically.
+    mockAudioEl = mockAudioEl || new Audio();
+    mockAudioEl.muted = true;
+    mockAudioEl.play().catch(() => {});
+    mockAudioEl.pause();
+    mockAudioEl.muted = false;
+  }
+  try {
+    const d = await api(`/api/ielts/mock/${fullMock.mock_id}/section/start`, {
+      method: "POST", body: JSON.stringify({section})
+    });
+    fullMock = d;
+    mockSyncClock(d.server_time);
+    mockSection = d;
+    setMockProgress(section);
+    if (section === "listening") renderMockListening(d);
+    else if (section === "reading") renderMockReading(d);
+    else if (section === "writing") renderMockWriting(d);
+    else renderMockSpeaking(d);
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = "Try again"; }
+    alert(e.message);
+  }
+}
+
+// ---------- objective questions (Listening / Reading) ----------
+
+function mockQuestionHTML(section, part, q, offset, saved) {
+  const name = `mock_${section}_${part}_${q.id}`;
+  const number = offset + Number(q.id);
+  const value = saved?.[String(q.id)] ?? "";
+  const opts = (q.options || []).filter(Boolean);
+  const control = opts.length
+    ? opts.map((o, i) => `
+        <div class="form-check">
+          <input class="form-check-input" type="radio" name="${name}" value="${esc(o)}" id="${name}_${i}" ${value === o ? "checked" : ""}>
+          <label class="form-check-label" for="${name}_${i}">${esc(o)}</label>
+        </div>`).join("")
+    : `<input class="form-control mock-answer" name="${name}" value="${esc(value)}" autocomplete="off" spellcheck="false">`;
+  return `<div class="mock-question" id="mockq_${section}_${number}">
+    ${q.instruction ? `<div class="small text-secondary mb-1">${esc(q.instruction)}</div>` : ""}
+    <div class="fw-semibold mb-2"><span class="mock-qnum">${number}</span> ${esc(q.question)}</div>
     ${control}
   </div>`;
 }
 
-function collectMockAnswers(section, part, questions) {
+function collectMockObjective(section) {
   const answers = {};
-  (questions || []).forEach(q => {
-    const name = `mock_${section}_${part}_${q.id}`;
-    const radio = document.querySelector(`input[name="${name}"]:checked`);
-    const textInput = document.querySelector(`input[name="${name}"]:not([type="radio"])`);
-    answers[String(q.id)] = radio ? radio.value : (textInput ? textInput.value.trim() : "");
-  });
+  for (const p of (mockSection?.parts || [])) {
+    const partAnswers = {};
+    for (const q of (p.content.questions || [])) {
+      const name = `mock_${section}_${p.part}_${q.id}`;
+      const radio = document.querySelector(`input[name="${name}"]:checked`);
+      const text = document.querySelector(`input[name="${name}"]:not([type="radio"])`);
+      partAnswers[String(q.id)] = radio ? radio.value : (text ? text.value.trim() : "");
+    }
+    answers[String(p.part)] = partAnswers;
+  }
   return answers;
 }
 
-async function loadMockObjectivePart(section, part) {
-  if (!fullMock) return;
-  const ws = document.getElementById("mockWorkspace");
-  ws.innerHTML = `<div class="loader">Generating ${esc(section)} ${section==="listening"?"Part":"Section"} ${part}…</div>`;
+function collectMockAnswers(section) {
+  if (section === "writing") {
+    return {"1": document.getElementById("mockWriting1")?.value || "",
+            "2": document.getElementById("mockWriting2")?.value || ""};
+  }
+  return collectMockObjective(section);
+}
+
+function scheduleMockSave() {
+  clearTimeout(mockSaveTimer);
+  mockSaveTimer = setTimeout(saveMockAnswers, 1500);
+}
+
+async function saveMockAnswers() {
+  if (!mockSection || mockSubmitting) return;
+  const section = mockSection.section;
   try {
-    const d = await api(`/api/ielts/mock/${fullMock.mock_id}/generate`, {
-      method:"POST",
-      body:JSON.stringify({section, part})
+    await api(`/api/ielts/mock/${fullMock.mock_id}/answers`, {
+      method: "POST", body: JSON.stringify({section, answers: collectMockAnswers(section)})
     });
-    const c = d.content || {};
-    fullMock.currentSection = section;
-    fullMock.currentPart = part;
-    fullMock.currentContent = c;
-    setMockProgress(section);
+    const s = document.getElementById("mockSaveState");
+    if (s) s.textContent = `Saved ${new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}`;
+  } catch {}
+}
 
-    const label = section === "listening" ? `Listening Part ${part} of 4` : `Reading Section ${part} of 3`;
-    const intro = section === "listening"
-      ? `<div class="mock-audio-box mb-3">
-           <strong>${esc(c.title || label)}</strong>
-           <p class="small text-secondary mb-2">Exam mode: the recording can be started once. Answer while listening.</p>
-           <button id="mockAudioBtn" class="btn btn-primary" onclick="playMockListeningOnce(${part})">▶ Play recording once</button>
-           <span id="mockAudioState" class="small text-secondary ms-2"></span>
-         </div>`
-      : `<div class="card-soft mb-3">
-           <h5>${esc(c.title || label)}</h5>
-           <div class="mock-passage">${esc(c.passage || "").replace(/\n/g,"<br>")}</div>
-         </div>`;
+function bindMockAutosave() {
+  document.getElementById("mockWorkspace").addEventListener("input", scheduleMockSave);
+  document.getElementById("mockWorkspace").addEventListener("change", scheduleMockSave);
+}
 
-    ws.innerHTML = `
-      <div class="d-flex justify-content-between align-items-center mb-2">
-        <h4 class="mb-0">${label}</h4>
-        <span class="badge text-bg-light">${(c.questions||[]).length} questions</span>
-      </div>
-      ${intro}
-      ${(c.questions || []).map(q => mockQuestionHTML(section, part, q)).join("")}
-      <div class="d-flex justify-content-end mt-3">
-        <button class="btn btn-primary" onclick="submitMockObjectivePart('${section}', ${part})">
-          Submit ${section==="listening"?"part":"section"}
-        </button>
-      </div>
-      <div id="mockPartResult" class="mt-3"></div>`;
-  } catch(e) {
-    ws.innerHTML = `<div class="alert alert-danger">${esc(e.message)}</div>`;
+function mockPartTabs(section, parts, label) {
+  return `<ul class="nav nav-tabs mb-3" role="tablist">
+    ${parts.map((p, i) => `<li class="nav-item"><button class="nav-link ${i === 0 ? "active" : ""}" data-mock-tab="${p.part}"
+       onclick="showMockPart(${p.part})">${label} ${p.part}</button></li>`).join("")}
+  </ul>`;
+}
+
+function showMockPart(part) {
+  document.querySelectorAll("[data-mock-tab]").forEach(b => b.classList.toggle("active", Number(b.dataset.mockTab) === part));
+  document.querySelectorAll("[data-mock-pane]").forEach(el => el.classList.toggle("d-none", Number(el.dataset.mockPane) !== part));
+}
+
+async function submitMockSection(auto = false) {
+  if (!mockSection || mockSubmitting) return;
+  const section = mockSection.section;
+  if (!auto && !confirm(`Finish ${MOCK_SECTION_LABEL[section]}? You cannot return to it.`)) return;
+  mockSubmitting = true;
+  stopMockTimers();
+  const ws = document.getElementById("mockWorkspace");
+  const answers = collectMockAnswers(section);
+  ws.innerHTML = `<div class="loader">${auto ? "Time is up. " : ""}Submitting ${esc(MOCK_SECTION_LABEL[section])}…</div>`;
+  try {
+    fullMock = await api(`/api/ielts/mock/${fullMock.mock_id}/section/submit`, {
+      method: "POST", body: JSON.stringify({section, answers})
+    });
+    mockSyncClock(fullMock.server_time);
+    mockSection = null;
+    ws.innerHTML = `<div class="card-soft"><h5>${esc(MOCK_SECTION_LABEL[section])} submitted</h5>
+      <p class="text-secondary mb-0">As in the real exam, results are shown only at the end.</p></div>`;
+    setTimeout(routeMock, 1500);
+  } catch (e) {
+    ws.innerHTML = `<div class="alert alert-danger">${esc(e.message)}
+      <button class="btn btn-sm btn-outline-danger ms-2" onclick="location.reload()">Reload</button></div>`;
+  } finally {
+    mockSubmitting = false;
   }
 }
 
-async function playMockListeningOnce(part) {
-  const key = `${fullMock?.mock_id}:${part}`;
-  if (mockAudioPlayed[key]) return;
-  const btn = document.getElementById("mockAudioBtn");
-  const state = document.getElementById("mockAudioState");
-  btn.disabled = true;
-  btn.textContent = "Loading audio…";
-  try {
-    const res = await fetch(`/api/ielts/mock/${fullMock.mock_id}/listening/${part}/audio`, {
-      headers: {"Authorization":`Bearer ${currentSession.access_token}`}
-    });
-    if (!res.ok) {
-      const d = await res.json().catch(()=>({}));
-      throw new Error(d.detail || "Could not create listening audio.");
-    }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    mockAudioPlayed[key] = true;
-    btn.textContent = "Recording started";
-    state.textContent = "Playing once…";
-    audio.onended = () => {
-      state.textContent = "Recording finished.";
-      btn.textContent = "Recording played";
-      URL.revokeObjectURL(url);
+// ---------- Listening ----------
+
+function renderMockListening(d) {
+  const ws = document.getElementById("mockWorkspace");
+  ws.innerHTML = `
+    <div class="mock-audio-box mb-3">
+      <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div><strong id="mockListenPhase">Listening</strong><div id="mockListenHint" class="small text-secondary"></div></div>
+        <div class="fw-semibold" id="mockPhaseClock"></div>
+      </div>
+      <div class="progress mt-2" style="height:6px"><div id="mockAudioProgress" class="progress-bar" style="width:0%"></div></div>
+    </div>
+    ${mockPartTabs("listening", d.parts, "Part")}
+    ${d.parts.map((p, i) => `<div data-mock-pane="${p.part}" class="${i === 0 ? "" : "d-none"}">
+        <h5 class="mb-2">Part ${p.part} · Questions ${(p.part - 1) * 10 + 1}–${p.part * 10}</h5>
+        ${(p.content.questions || []).map(q => mockQuestionHTML("listening", p.part, q, (p.part - 1) * 10, p.answers)).join("")}
+      </div>`).join("")}
+    <div class="d-flex justify-content-between align-items-center mt-3">
+      <span id="mockSaveState" class="small text-secondary"></span>
+      <button class="btn btn-outline-primary" onclick="submitMockSection(false)">Finish Listening</button>
+    </div>`;
+  bindMockAutosave();
+  startMockDeadline(d.timing.deadline, () => submitMockSection(true), "Listening time");
+  runMockListening(d);
+}
+
+function mockCountdown(seconds, runId, label, hint) {
+  return new Promise(resolve => {
+    const end = Date.now() + seconds * 1000;
+    document.getElementById("mockListenPhase").textContent = label;
+    document.getElementById("mockListenHint").textContent = hint || "";
+    const tick = () => {
+      if (runId !== mockListeningRun) return resolve(false);
+      const left = (end - Date.now()) / 1000;
+      const clock = document.getElementById("mockPhaseClock");
+      if (clock) clock.textContent = mockFmt(left);
+      if (left <= 0) return resolve(true);
+      setTimeout(tick, 250);
     };
-    await audio.play();
-  } catch(e) {
-    mockAudioPlayed[key] = false;
-    btn.disabled = false;
-    btn.textContent = "▶ Play recording once";
-    state.textContent = e.message;
-  }
+    tick();
+  });
 }
 
-async function submitMockObjectivePart(section, part) {
-  const c = fullMock?.currentContent || {};
-  const answers = collectMockAnswers(section, part, c.questions || []);
-  const unanswered = Object.values(answers).filter(x=>!String(x).trim()).length;
-  if (unanswered && !confirm(`${unanswered} question(s) are unanswered. Submit anyway?`)) return;
-  const resultEl = document.getElementById("mockPartResult");
-  resultEl.innerHTML = `<div class="loader">Checking answers…</div>`;
-  try {
-    const d = await api(`/api/ielts/mock/${fullMock.mock_id}/objective/submit`, {
-      method:"POST",
-      body:JSON.stringify({section, part, answers})
+async function playMockPart(part, runId) {
+  document.getElementById("mockListenPhase").textContent = `Part ${part} · recording`;
+  document.getElementById("mockListenHint").textContent = "Answer the questions while you listen. The recording is played once.";
+  document.getElementById("mockPhaseClock").textContent = "▶";
+  const bar = document.getElementById("mockAudioProgress");
+  bar.style.width = "0%";
+  let blob = null;
+  for (let attempt = 0; attempt < 2 && !blob; attempt++) {
+    try {
+      const res = await fetch(`/api/ielts/mock/${fullMock.mock_id}/listening/${part}/audio`, {
+        headers: {"Authorization": `Bearer ${currentSession.access_token}`}
+      });
+      if (res.status === 403) {
+        const d = await res.json().catch(() => ({}));
+        document.getElementById("mockListenHint").textContent = d.detail || "This recording has already been played.";
+        return;
+      }
+      if (res.ok) blob = await res.blob();
+    } catch {}
+  }
+  if (!blob || runId !== mockListeningRun) return;
+  const url = URL.createObjectURL(blob);
+  const audio = mockAudioEl || new Audio();
+  await new Promise(resolve => {
+    audio.onended = () => resolve();
+    audio.onerror = () => resolve();
+    audio.ontimeupdate = () => {
+      if (audio.duration && isFinite(audio.duration)) bar.style.width = `${(audio.currentTime / audio.duration) * 100}%`;
+      if (runId !== mockListeningRun) { audio.pause(); resolve(); }
+    };
+    audio.src = url;
+    audio.play().catch(() => {
+      document.getElementById("mockListenHint").innerHTML =
+        `The browser blocked playback. <button class="btn btn-sm btn-primary ms-1" id="mockUnblock">▶ Play</button>`;
+      document.getElementById("mockUnblock").onclick = () => audio.play();
     });
-    resultEl.innerHTML = `
-      <div class="alert alert-light">
-        <strong>${d.part_raw_score}/${d.part_total}</strong> correct in this ${section==="listening"?"part":"section"}.
-        ${d.section_band != null ? `<br><strong>${section} practice band: ${Number(d.section_band).toFixed(1)}</strong>` : ""}
-      </div>`;
+  });
+  URL.revokeObjectURL(url);
+  bar.style.width = "100%";
+}
 
-    const last = section === "listening" ? 4 : 3;
-    if (part < last) {
-      resultEl.innerHTML += `<button class="btn btn-primary" onclick="loadMockObjectivePart('${section}', ${part+1})">Continue to ${section==="listening"?"Part":"Section"} ${part+1}</button>`;
-    } else if (section === "listening") {
-      resultEl.innerHTML += `<button class="btn btn-primary" onclick="beginMockReading()">Continue to Reading</button>`;
-    } else {
-      resultEl.innerHTML += `<button class="btn btn-primary" onclick="beginMockWriting()">Continue to Writing</button>`;
+async function runMockListening(d) {
+  const runId = ++mockListeningRun;
+  const served = d.listening_served || {};
+  const firstUnplayed = [1, 2, 3, 4].find(p => !served[String(p)]);
+  if (firstUnplayed) {
+    for (let part = firstUnplayed; part <= 4; part++) {
+      showMockPart(part);
+      const q1 = (part - 1) * 10 + 1;
+      if (!await mockCountdown(30, runId, `Part ${part} · look at the questions`, `Questions ${q1}–${q1 + 9}. The recording starts automatically.`)) return;
+      await playMockPart(part, runId);
+      if (runId !== mockListeningRun) return;
+      if (part < 4 && !await mockCountdown(30, runId, `Part ${part} · check your answers`, "")) return;
     }
-  } catch(e) {
-    resultEl.innerHTML = `<div class="alert alert-danger">${esc(e.message)}</div>`;
   }
+  // Review time: 2 minutes, but never beyond the server deadline.
+  const left = Math.min(120, (new Date(d.timing.deadline).getTime() - mockNow()) / 1000 - 5);
+  await saveMockAnswers();
+  if (!await mockCountdown(Math.max(0, left), runId, "Review your answers",
+      "You have 2 minutes to check all 40 answers. They will then be submitted automatically.")) return;
+  submitMockSection(true);
 }
 
-async function beginMockReading() {
-  setMockProgress("reading");
-  startMockTimer(60*60);
-  await loadMockObjectivePart("reading", 1);
-}
+// ---------- Reading ----------
 
-async function beginMockWriting() {
-  setMockProgress("writing");
-  startMockTimer(60*60);
-  await loadMockWriting();
-}
-
-async function loadMockWriting() {
+function renderMockReading(d) {
   const ws = document.getElementById("mockWorkspace");
-  ws.innerHTML = `<div class="loader">Generating the complete Writing paper…</div>`;
-  try {
-    const d = await api(`/api/ielts/mock/${fullMock.mock_id}/generate`, {
-      method:"POST", body:JSON.stringify({section:"writing",part:1})
-    });
-    const c = d.content || {};
-    fullMock.writingPaper = c;
-    ws.innerHTML = `
-      <h4>IELTS Writing · 60 minutes</h4>
-      <p class="text-secondary">Complete both tasks. Task 2 carries more weight in the Writing band.</p>
-      <div class="card-soft mb-3">
-        <div class="d-flex justify-content-between"><h5>${esc(c.task1?.title || "Task 1")}</h5><span>${esc(c.task1?.suggested_minutes || 20)} min</span></div>
-        <p>${esc(c.task1?.prompt || "")}</p>
-        <div class="small text-secondary">Write at least ${esc(c.task1?.minimum_words || 150)} words.</div>
-      </div>
-      <textarea id="mockWriting1" class="form-control" rows="10" placeholder="Write Task 1 here…"></textarea>
-      <div id="mockWords1" class="small text-secondary text-end mt-1">0 words</div>
-
-      <div class="card-soft my-3">
-        <div class="d-flex justify-content-between"><h5>${esc(c.task2?.title || "Task 2")}</h5><span>${esc(c.task2?.suggested_minutes || 40)} min</span></div>
-        <p>${esc(c.task2?.prompt || "")}</p>
-        <div class="small text-secondary">Write at least ${esc(c.task2?.minimum_words || 250)} words.</div>
-      </div>
-      <textarea id="mockWriting2" class="form-control" rows="13" placeholder="Write Task 2 here…"></textarea>
-      <div id="mockWords2" class="small text-secondary text-end mt-1">0 words</div>
-      <div class="d-flex justify-content-end mt-3"><button class="btn btn-primary" onclick="submitMockWriting()">Submit Writing</button></div>
-      <div id="mockWritingResult" class="mt-3"></div>`;
-    const wc = (id,out) => document.getElementById(id).addEventListener("input", e => {
-      const n = e.target.value.trim() ? e.target.value.trim().split(/\s+/).length : 0;
-      document.getElementById(out).textContent = `${n} words`;
-    });
-    wc("mockWriting1","mockWords1"); wc("mockWriting2","mockWords2");
-  } catch(e) { ws.innerHTML = `<div class="alert alert-danger">${esc(e.message)}</div>`; }
+  let offset = 0;
+  const panes = d.parts.map((p, i) => {
+    const html = `<div data-mock-pane="${p.part}" class="${i === 0 ? "" : "d-none"}">
+      <div class="row g-3">
+        <div class="col-lg-6"><div class="card-soft mock-reading-passage">
+          <h5>${esc(p.content.title || `Passage ${p.part}`)}</h5>
+          <div class="mock-passage">${esc(p.content.passage || "").replace(/\n/g, "<br>")}</div></div></div>
+        <div class="col-lg-6 mock-reading-questions">
+          ${(p.content.questions || []).map(q => mockQuestionHTML("reading", p.part, q, offset, p.answers)).join("")}
+        </div>
+      </div></div>`;
+    offset += (p.content.questions || []).length;
+    return html;
+  }).join("");
+  ws.innerHTML = `${mockPartTabs("reading", d.parts, "Passage")}${panes}
+    <div class="d-flex justify-content-between align-items-center mt-3">
+      <span id="mockSaveState" class="small text-secondary"></span>
+      <button class="btn btn-primary" onclick="submitMockSection(false)">Finish Reading</button>
+    </div>`;
+  bindMockAutosave();
+  startMockDeadline(d.timing.deadline, () => submitMockSection(true), "Reading time");
 }
 
-async function submitMockWriting() {
-  const t1 = document.getElementById("mockWriting1").value.trim();
-  const t2 = document.getElementById("mockWriting2").value.trim();
-  if (!t1 || !t2) return alert("Complete both Writing tasks before submitting.");
-  const el = document.getElementById("mockWritingResult");
-  el.innerHTML = `<div class="loader">Assessing both writing tasks…</div>`;
-  try {
-    const d = await api(`/api/ielts/mock/${fullMock.mock_id}/writing/submit`, {
-      method:"POST", body:JSON.stringify({task1_response:t1, task2_response:t2})
-    });
-    el.innerHTML = `
-      <div class="alert alert-primary"><strong>Writing practice band: ${Number(d.writing_band).toFixed(1)}</strong></div>
-      <div class="row g-2">
-        ${bandCard("Task 1", d.task1?.overall_band)}
-        ${bandCard("Task 2", d.task2?.overall_band)}
-      </div>
-      <p class="small text-secondary mt-2">${esc(d.disclaimer || "")}</p>
-      <button class="btn btn-primary" onclick="beginMockSpeaking()">Continue to Speaking</button>`;
-  } catch(e) { el.innerHTML = `<div class="alert alert-danger">${esc(e.message)}</div>`; }
+// ---------- Writing ----------
+
+function renderMockWriting(d) {
+  const ws = document.getElementById("mockWorkspace");
+  const task = n => d.parts.find(p => p.part === n) || {content: {}, answers: {}};
+  const pane = n => {
+    const t = task(n);
+    return `<div data-mock-pane="${n}" class="${n === 1 ? "" : "d-none"}">
+      <div class="row g-3">
+        <div class="col-lg-5"><div class="card-soft">
+          <h5>${esc(t.content.title || `Task ${n}`)}</h5>
+          ${n === 1 && t.content.chart ? `<div id="mockChart1" class="mb-2"></div>` : ""}
+          <p style="white-space:pre-line">${esc(t.content.prompt || "")}</p>
+          <div class="small text-secondary">Write at least ${esc(t.content.minimum_words || (n === 1 ? 150 : 250))} words. Suggested time: ${esc(t.content.suggested_minutes || (n === 1 ? 20 : 40))} minutes.</div>
+        </div></div>
+        <div class="col-lg-7">
+          <textarea id="mockWriting${n}" class="form-control mock-writing" rows="18" spellcheck="false"
+            placeholder="Write Task ${n} here…">${esc(t.answers?.response || "")}</textarea>
+          <div id="mockWords${n}" class="small text-secondary text-end mt-1">0 words</div>
+        </div>
+      </div></div>`;
+  };
+  ws.innerHTML = `${mockPartTabs("writing", d.parts, "Task")}${pane(1)}${pane(2)}
+    <div class="d-flex justify-content-between align-items-center mt-3">
+      <span id="mockSaveState" class="small text-secondary"></span>
+      <button class="btn btn-primary" onclick="submitMockSection(false)">Finish Writing</button>
+    </div>`;
+  if (typeof renderTask1Chart === "function") {
+    const c = task(1).content.chart;
+    if (c) renderTask1Chart("mockChart1", c);
+  }
+  const wc = n => {
+    const el = document.getElementById(`mockWriting${n}`);
+    const draw = () => {
+      const words = el.value.trim() ? el.value.trim().split(/\s+/).length : 0;
+      document.getElementById(`mockWords${n}`).textContent = `${words} words`;
+    };
+    el.addEventListener("input", draw);
+    el.addEventListener("paste", e => e.preventDefault());  // no pasting, as on the exam computer
+    draw();
+  };
+  wc(1); wc(2);
+  bindMockAutosave();
+  startMockDeadline(d.timing.deadline, () => submitMockSection(true), "Writing time");
 }
 
-async function beginMockSpeaking() {
-  setMockProgress("speaking");
-  startMockTimer(14*60);
-  await loadMockSpeaking();
-}
+// ---------- Speaking (examiner mode comes in a later stage) ----------
 
 function speakingPromptHTML(part, obj) {
   if (part === 2) {
     return `<p>${esc(obj.instructions || "")}</p>
       <div class="alert alert-light"><strong>${esc(obj.cue_card || "")}</strong>
-      <ul class="mb-0">${(obj.bullet_points||[]).map(x=>`<li>${esc(x)}</li>`).join("")}</ul></div>
+      <ul class="mb-0">${(obj.bullet_points || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul></div>
       <div class="small text-secondary">Preparation: ${esc(obj.preparation_seconds || 60)} sec · Speak: up to ${esc(obj.speaking_seconds || 120)} sec</div>`;
   }
-  return `<p>${esc(obj.instructions || "")}</p><ol>${(obj.questions||[]).map(q=>`<li>${esc(q)}</li>`).join("")}</ol>`;
+  return `<p>${esc(obj.instructions || "")}</p><ol>${(obj.questions || []).map(q => `<li>${esc(q)}</li>`).join("")}</ol>`;
 }
 
-async function loadMockSpeaking() {
+function renderMockSpeaking(d) {
   const ws = document.getElementById("mockWorkspace");
-  ws.innerHTML = `<div class="loader">Generating complete Speaking interview…</div>`;
-  try {
-    const d = await api(`/api/ielts/mock/${fullMock.mock_id}/generate`, {
-      method:"POST", body:JSON.stringify({section:"speaking",part:1})
-    });
-    const c = d.content || {};
-    fullMock.speakingPaper = c;
-    ws.innerHTML = `
-      <h4>IELTS Speaking · Parts 1–3</h4>
-      <p class="text-secondary">Answer aloud. Record each part; the audio is transcribed and the complete interview is assessed together.</p>
-      ${[1,2,3].map(p=>`
-        <div class="card-soft mb-3">
-          <h5>Part ${p}</h5>
-          ${speakingPromptHTML(p, c[`part${p}`] || {})}
-          <textarea id="mockSpeaking${p}" class="form-control mt-3" rows="${p===2?6:8}" placeholder="Transcript for Part ${p}…"></textarea>
-          <button id="mockSpeakBtn${p}" class="btn btn-outline-primary mt-2" onclick="recordMockSpeaking(${p})">🎙 Record Part ${p}</button>
-        </div>`).join("")}
-      <div class="d-flex justify-content-end"><button class="btn btn-primary" onclick="submitMockSpeaking()">Submit complete Speaking interview</button></div>
-      <div id="mockSpeakingResult" class="mt-3"></div>`;
-  } catch(e) { ws.innerHTML = `<div class="alert alert-danger">${esc(e.message)}</div>`; }
+  const c = {};
+  d.parts.forEach(p => { c[`part${p.part}`] = p.content; });
+  ws.innerHTML = `
+    <h4>IELTS Speaking · Parts 1–3</h4>
+    <p class="text-secondary">Answer aloud. Record each part; the audio is transcribed and the complete interview is assessed together.</p>
+    ${[1, 2, 3].map(p => `
+      <div class="card-soft mb-3">
+        <h5>Part ${p}</h5>
+        ${speakingPromptHTML(p, c[`part${p}`] || {})}
+        <textarea id="mockSpeaking${p}" class="form-control mt-3" rows="${p === 2 ? 6 : 8}" placeholder="Transcript for Part ${p}…"></textarea>
+        <button id="mockSpeakBtn${p}" class="btn btn-outline-primary mt-2" onclick="recordMockSpeaking(${p})">🎙 Record Part ${p}</button>
+      </div>`).join("")}
+    <div class="d-flex justify-content-end"><button class="btn btn-primary" onclick="submitMockSpeaking()">Finish Speaking</button></div>
+    <div id="mockSpeakingResult" class="mt-3"></div>`;
+  startMockDeadline(d.timing.deadline, null, "Speaking time");
 }
 
 async function recordMockSpeaking(part) {
@@ -1406,72 +1591,90 @@ async function recordMockSpeaking(part) {
   }
   if (!navigator.mediaDevices || !window.MediaRecorder) return alert("Audio recording is not supported in this browser.");
   try {
-    mockSpeakingStream = await navigator.mediaDevices.getUserMedia({audio:true});
+    mockSpeakingStream = await navigator.mediaDevices.getUserMedia({audio: true});
     const preferred = "audio/webm;codecs=opus";
-    mockSpeakingRecorder = new MediaRecorder(
-      mockSpeakingStream,
-      MediaRecorder.isTypeSupported(preferred) ? {mimeType:preferred} : {}
-    );
+    mockSpeakingRecorder = new MediaRecorder(mockSpeakingStream, MediaRecorder.isTypeSupported(preferred) ? {mimeType: preferred} : {});
     mockSpeakingChunks = [];
-    mockSpeakingRecorder.ondataavailable = e => { if(e.data?.size) mockSpeakingChunks.push(e.data); };
+    mockSpeakingRecorder.ondataavailable = e => { if (e.data?.size) mockSpeakingChunks.push(e.data); };
     mockSpeakingRecorder.onstop = async () => {
       btn.disabled = true; btn.textContent = "Transcribing…";
-      mockSpeakingStream?.getTracks().forEach(t=>t.stop());
+      mockSpeakingStream?.getTracks().forEach(t => t.stop());
       try {
-        const blob = new Blob(mockSpeakingChunks,{type:mockSpeakingRecorder.mimeType || "audio/webm"});
+        const blob = new Blob(mockSpeakingChunks, {type: mockSpeakingRecorder.mimeType || "audio/webm"});
         const form = new FormData();
-        form.append("audio",blob,`ielts-mock-speaking-${part}.webm`);
-        form.append("scenario",`Full IELTS Mock Speaking Part ${part}`);
-        const d = await apiForm("/api/audio/transcribe",form);
+        form.append("audio", blob, `ielts-mock-speaking-${part}.webm`);
+        form.append("scenario", `Full IELTS Mock Speaking Part ${part}`);
+        const d = await apiForm("/api/audio/transcribe", form);
         document.getElementById(`mockSpeaking${part}`).value = d.transcript;
-      } catch(e) { alert(e.message); }
+      } catch (e) { alert(e.message); }
       finally {
-        btn.disabled=false; btn.textContent=`🎙 Record Part ${part}`;
-        mockSpeakingRecorder=null; mockSpeakingChunks=[];
+        btn.disabled = false; btn.textContent = `🎙 Record Part ${part}`;
+        mockSpeakingRecorder = null; mockSpeakingChunks = [];
       }
     };
     mockSpeakingRecorder.start();
     btn.textContent = "⏹ Stop recording";
     const limit = part === 2 ? 130000 : 300000;
-    setTimeout(()=>{ if(mockSpeakingRecorder?.state==="recording") mockSpeakingRecorder.stop(); }, limit);
-  } catch(e) { alert("Microphone access failed."); }
+    setTimeout(() => { if (mockSpeakingRecorder?.state === "recording") mockSpeakingRecorder.stop(); }, limit);
+  } catch (e) { alert("Microphone access failed."); }
 }
 
 async function submitMockSpeaking() {
   const transcripts = {
-    "1":document.getElementById("mockSpeaking1").value.trim(),
-    "2":document.getElementById("mockSpeaking2").value.trim(),
-    "3":document.getElementById("mockSpeaking3").value.trim()
+    "1": document.getElementById("mockSpeaking1").value.trim(),
+    "2": document.getElementById("mockSpeaking2").value.trim(),
+    "3": document.getElementById("mockSpeaking3").value.trim()
   };
-  if (Object.values(transcripts).some(x=>!x)) return alert("Complete all three Speaking parts.");
+  if (Object.values(transcripts).some(x => !x)) return alert("Complete all three Speaking parts.");
   const el = document.getElementById("mockSpeakingResult");
-  el.innerHTML = `<div class="loader">Assessing complete speaking interview…</div>`;
+  el.innerHTML = `<div class="loader">Submitting the Speaking test…</div>`;
   try {
-    const d = await api(`/api/ielts/mock/${fullMock.mock_id}/speaking/submit`, {
-      method:"POST", body:JSON.stringify({transcripts})
+    fullMock = await api(`/api/ielts/mock/${fullMock.mock_id}/speaking/submit`, {
+      method: "POST", body: JSON.stringify({transcripts})
     });
-    el.innerHTML = `
-      <div class="alert alert-primary"><strong>Provisional Speaking language band: ${Number(d.provisional_language_band).toFixed(1)}</strong></div>
-      <div class="row g-2">
-        ${bandCard("Fluency & Coherence",d.fluency_coherence)}
-        ${bandCard("Lexical Resource",d.lexical_resource)}
-        ${bandCard("Grammar",d.grammatical_range_accuracy)}
-        ${bandCard("Pronunciation",null)}
-      </div>
-      <p class="small text-secondary mt-2">${esc(d.disclaimer || "Pronunciation is not assessed from transcript-only evidence.")}</p>
-      <button class="btn btn-primary" onclick="finishFullIELTSMock()">Finish mock & calculate result</button>`;
-  } catch(e) { el.innerHTML = `<div class="alert alert-danger">${esc(e.message)}</div>`; }
+    stopMockTimers();
+    mockSection = null;
+    routeMock();
+  } catch (e) { el.innerHTML = `<div class="alert alert-danger">${esc(e.message)}</div>`; }
+}
+
+// ---------- Results ----------
+
+function mockObjectiveReview(section, review) {
+  let offset = 0;
+  return Object.entries(review || {}).map(([part, r]) => {
+    const details = r.result?.details || [];
+    const rows = details.map(x => {
+      const n = offset + Number(x.id);
+      return `<tr class="${x.correct ? "" : "table-warning"}"><td>${n}</td><td>${esc(x.answer || "—")}</td>
+        <td>${esc((x.accepted || []).join(" / "))}</td><td>${x.correct ? "✅" : "❌"}</td>
+        <td class="small text-secondary">${esc(x.explanation || "")}</td></tr>`;
+    }).join("");
+    offset += details.length;
+    return `<details class="mb-2"><summary>${section === "listening" ? "Part" : "Passage"} ${esc(part)}: ${esc(r.raw_score ?? "—")}/${esc(r.total ?? "—")} ${r.title ? `· ${esc(r.title)}` : ""}</summary>
+      <div class="table-responsive mt-2"><table class="table table-sm align-middle"><thead><tr><th>#</th><th>Your answer</th><th>Correct</th><th></th><th>Why</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${r.transcript ? `<div class="small"><strong>Transcript</strong><div class="text-secondary" style="white-space:pre-line">${esc(r.transcript)}</div></div>` : ""}
+    </details>`;
+  }).join("");
 }
 
 async function finishFullIELTSMock() {
   if (!fullMock) return;
-  clearInterval(mockTimerHandle);
+  stopMockTimers();
+  setMockProgress("results");
   const ws = document.getElementById("mockWorkspace");
-  ws.innerHTML = `<div class="loader">Calculating complete mock result…</div>`;
+  ws.innerHTML = `<div class="loader">Calculating your result…</div>`;
+  document.getElementById("mockTimer").textContent = "--:--";
   try {
-    const d = await api(`/api/ielts/mock/${fullMock.mock_id}/finish`, {method:"POST",body:"{}"});
-    setMockProgress("results");
+    const d = await api(`/api/ielts/mock/${fullMock.mock_id}/finish`, {method: "POST", body: "{}"});
+    if (d.overall_band == null) {  // writing is still being assessed
+      ws.innerHTML = `<div class="loader">${esc(d.detail || "Assessing Writing…")}</div>`;
+      mockPollTimer = setTimeout(finishFullIELTSMock, 5000);
+      return;
+    }
     const b = d.bands || {};
+    const w = d.review?.writing || {};
+    const sp = d.review?.speaking?.["1"]?.result || {};
     ws.innerHTML = `
       <div class="text-center mb-4">
         <div class="small text-secondary">PRACTICE OVERALL BAND</div>
@@ -1479,39 +1682,48 @@ async function finishFullIELTSMock() {
         <div class="text-secondary">${esc(fullMock.test_type || "IELTS")} Full Mock</div>
       </div>
       <div class="row g-3 mb-4">
-        ${bandCard("Listening",b.listening)}
-        ${bandCard("Reading",b.reading)}
-        ${bandCard("Writing",b.writing)}
-        ${bandCard("Speaking*",b.speaking)}
+        ${bandCard("Listening", b.listening)}${bandCard("Reading", b.reading)}
+        ${bandCard("Writing", b.writing)}${bandCard("Speaking*", b.speaking)}
       </div>
-      <div class="alert alert-warning">${esc(d.disclaimer)}</div>
-      <div class="card-soft">
-        <h5>What this result means</h5>
-        <p class="mb-2">Listening and Reading use 40-question raw scores with practice band conversion. Writing uses AI feedback with Task 2 weighted more heavily. Speaking is provisional because pronunciation is not acoustically scored.</p>
-        <button class="btn btn-primary" onclick="resetFullIELTSMock()">Start another full mock</button>
-        <button class="btn btn-outline-primary ms-2" onclick="openPage('ielts-dashboard')">IELTS Dashboard</button>
-      </div>`;
+      <div class="alert alert-warning small">${esc(d.disclaimer)}</div>
+      <div class="card-soft mb-3"><h5>Listening review</h5>${mockObjectiveReview("listening", d.review?.listening)}</div>
+      <div class="card-soft mb-3"><h5>Reading review</h5>${mockObjectiveReview("reading", d.review?.reading)}</div>
+      <div class="card-soft mb-3"><h5>Writing</h5>
+        ${[1, 2].map(n => {
+          const r = w[String(n)]?.result || {};
+          return `<details class="mb-2"><summary>Task ${n}: band ${esc(r.overall_band ?? "—")}</summary>
+            <div class="small mt-2">${(r.improvements || []).map(x => `<div class="mb-1"><strong>${esc(x.criterion)}:</strong> ${esc(x.issue)} — <span class="text-secondary">${esc(x.action)}</span></div>`).join("")}</div>
+          </details>`;
+        }).join("")}
+      </div>
+      <div class="card-soft mb-3"><h5>Speaking</h5>
+        ${(sp.improvements || []).map(x => `<div class="small mb-1"><strong>${esc(x.criterion)}:</strong> ${esc(x.issue)} — <span class="text-secondary">${esc(x.action)}</span></div>`).join("") || '<div class="small text-secondary">No feedback.</div>'}
+      </div>
+      <button class="btn btn-primary" onclick="resetFullIELTSMock()">Start another full mock</button>
+      <button class="btn btn-outline-primary ms-2" onclick="openPage('ielts-dashboard')">IELTS Dashboard</button>`;
     localStorage.removeItem("activeIELTSMockId");
     await loadIELTSDashboard();
-  } catch(e) { ws.innerHTML = `<div class="alert alert-danger">${esc(e.message)}</div>`; }
+  } catch (e) { ws.innerHTML = `<div class="alert alert-danger">${esc(e.message)}</div>`; }
 }
 
 function resetFullIELTSMock() {
-  clearInterval(mockTimerHandle);
+  stopMockTimers();
   fullMock = null;
-  mockAudioPlayed = {};
+  mockSection = null;
   localStorage.removeItem("activeIELTSMockId");
-  document.getElementById("mockExam").classList.add("d-none");
-  document.getElementById("mockSetup").classList.remove("d-none");
   location.reload();
 }
 
-// Extend navigation again so an in-progress full mock can be resumed.
+// Extend navigation so an in-progress full mock is resumed when the page is opened.
 const openPageBeforeFullMock = openPage;
 openPage = function(name) {
   openPageBeforeFullMock(name);
   if (name === "ielts-mock") resumeFullIELTSMock();
 };
+
+window.addEventListener("beforeunload", e => {
+  if (mockSection) { saveMockAnswers(); e.preventDefault(); e.returnValue = ""; }
+});
 
 
 /* ===================== Listening Practice (General English) ===================== */

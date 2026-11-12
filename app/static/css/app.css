@@ -126,3 +126,9 @@ pre.feedback { white-space: pre-wrap; font-family: inherit; margin: 0; }
 .listen-evidence.ok { background: #d1f2dc; }
 .listen-evidence.bad { background: #ffe1b3; }
 .listen-evidence sup { font-weight: 700; margin-right: 2px; color: #3b3b98; }
+
+/* Computer-delivered IELTS mock */
+.mock-qnum { display: inline-block; min-width: 2rem; padding: 0 .4rem; margin-right: .35rem; border: 1px solid #c7c7e8; border-radius: 4px; text-align: center; font-weight: 700; }
+.mock-reading-passage, .mock-reading-questions { max-height: 72vh; overflow-y: auto; }
+.mock-writing { font-family: inherit; line-height: 1.6; }
+.mock-answer { max-width: 22rem; }

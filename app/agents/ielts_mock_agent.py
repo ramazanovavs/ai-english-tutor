@@ -5,43 +5,91 @@ from app.agents.ielts_agent import EXAM_LEVEL
 from app.services.ielts_scoring import criterion, criteria_band
 
 
-def generate_listening_part(part: int) -> dict:
-    contexts = {
-        1: "an everyday social conversation between two speakers, such as booking, services, travel, or accommodation",
-        2: "one speaker giving information about an everyday social setting, local facility, event, or service",
-        3: "an educational or training discussion between two or three speakers",
-        4: "one speaker giving an academic-style talk or lecture for non-specialists",
+LISTENING_CONTEXTS = {
+    1: "an everyday social conversation between two speakers (e.g. booking, enquiry, service, travel, accommodation)",
+    2: "one speaker giving information about an everyday social setting, local facility, event or service",
+    3: "an educational or training discussion between two or three speakers (e.g. students and a tutor)",
+    4: "one speaker giving an academic lecture or talk for non-specialists",
+}
+
+
+def _clean_listening_part(data: dict, part: int) -> dict:
+    speakers = [
+        {"name": str(s.get("name") or f"Speaker {i + 1}").strip(),
+         "gender": "male" if str(s.get("gender", "")).lower().startswith("m") else "female"}
+        for i, s in enumerate(data.get("speakers") or [])
+    ] or [{"name": "Speaker", "gender": "female"}]
+    names = {s["name"] for s in speakers}
+    script = []
+    for line in data.get("script") or []:
+        text = str(line.get("text") or "").strip()
+        if text:
+            who = str(line.get("speaker") or "").strip()
+            script.append({"speaker": who if who in names else speakers[0]["name"], "text": text})
+    questions = (data.get("questions") or [])[:10]
+    if not script or len(questions) != 10:
+        raise ValueError(f"Listening Part {part} is incomplete.")
+    key = data.get("answer_key") or {}
+    for q in questions:
+        qid = str(q.get("id"))
+        accepted = key.get(qid)
+        if not accepted:
+            raise ValueError(f"Listening Part {part}: no answer for question {qid}.")
+        key[qid] = accepted if isinstance(accepted, list) else [accepted]
+    return {
+        "title": str(data.get("title") or f"Part {part}"),
+        "intro": str(data.get("intro") or f"Part {part}.").strip(),
+        "speakers": speakers,
+        "script": script,
+        "questions": questions,
+        "answer_key": key,
+        "explanations": data.get("explanations") or {},
+        # Plain text kept for the review after the exam.
+        "audio_script": "\n".join(f"{l['speaker']}: {l['text']}" for l in script),
     }
-    instructions = """
-Create ONE original IELTS-style Listening mock-test part for exam practice.
-Never copy or closely imitate a published IELTS item.
+
+
+def generate_listening_part(part: int) -> dict:
+    situation = LISTENING_CONTEXTS[part]
+    first_q = (part - 1) * 10 + 1
+    instructions = f"""
+Create ONE original IELTS Listening Part {part} for a computer-delivered mock exam.
+Never copy or closely imitate a published IELTS item. The text will be voiced by text-to-speech,
+one voice per speaker, so write ONLY spoken words (no stage directions, no sound effects).
 
 Return JSON with exactly:
 title (string),
-audio_script (string),
+intro (string): what the exam narrator says before the recording, e.g.
+  "Part {part}. You will hear ... First, you have some time to look at questions {first_q} to {first_q + 4}."
+  (mention questions {first_q}-{first_q + 9} with the real numbers; do NOT read the questions),
+speakers (array of objects with name and gender "female" or "male"),
+script (array of objects with speaker and text; speaker is one of the speakers' names),
 questions (array of exactly 10 objects),
-answer_key (object),
-explanations (object).
+answer_key (object mapping "1".."10" to an ARRAY of accepted exact answers),
+explanations (object mapping "1".."10" to one short sentence, quoting where the answer is heard).
 
 Each question object:
-id (integer 1-10),
+id (integer 1-10 within this part; the website shows them as {first_q}-{first_q + 9}),
 type (one of "multiple_choice", "completion", "short_answer"),
-question (string),
+question (string; for completion use a sentence/note/table line with "___" for the gap),
 options (array: exactly 4 choices for multiple_choice; [] otherwise),
-instruction (string; for completion/short answer give a clear word limit such as "NO MORE THAN TWO WORDS").
+instruction (string; for completion/short answer a strict IELTS word limit such as
+  "Write NO MORE THAN TWO WORDS AND/OR A NUMBER" or "Write ONE WORD ONLY").
 
-answer_key maps "1"..."10" to an array of accepted exact answers.
-For multiple choice, accepted answer should be the full option text.
-For completion/short answer, provide sensible spelling variants only when genuinely equivalent.
-
-Make the recording natural and long enough for serious practice: about 430-520 words.
-Questions must follow the order of information in the recording.
+Accepted answers must respect the word limit and be said in the recording; for multiple choice the accepted
+answer is the full option text. Add spelling variants only when genuinely equivalent (e.g. "12" and "twelve").
+Script length: 600-800 words, natural spoken English with realistic distractors (a speaker corrects
+themselves, mentions a wrong option first, etc.). Questions follow the order of the recording.
 Do not reveal answers in question wording.
 """
-    return ask_json(
-        instructions,
-        f"Part: {part}\nSituation: {contexts[part]}\n{EXAM_LEVEL}",
-    )
+    last_error = None
+    for _ in range(2):
+        try:
+            return _clean_listening_part(
+                ask_json(instructions, f"Part: {part}\nSituation: {situation}\n{EXAM_LEVEL}"), part)
+        except ValueError as exc:
+            last_error = exc
+    raise last_error
 
 
 def generate_reading_section(test_type: str, section: int) -> dict:

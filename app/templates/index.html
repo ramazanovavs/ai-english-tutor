@@ -286,11 +286,13 @@
         </select>
       </div>
       <div class="col-md-4 d-grid align-self-end">
-        <button class="btn btn-primary" onclick="startFullIELTSMock()">Start full mock</button>
+        <button id="mockStartBtn" class="btn btn-primary" onclick="startFullIELTSMock()">Start full mock</button>
       </div>
     </div>
     <div class="small text-secondary mt-3">
-      Recommended practice timing: Listening ≈30 min, Reading 60 min, Writing 60 min, Speaking 11–14 min.
+      Computer-delivered format: Listening ≈30 min (each recording once, 2 min review), Reading 60 min, Writing 60 min, Speaking 11–14 min.
+      The whole paper is prepared in the background when you start; clocks run on the server, and answers are saved and submitted automatically when time is up.
+      Results are shown only at the end.
     </div>
   </div>
 
@@ -301,7 +303,7 @@
         <div id="mockExamLabel" class="fw-semibold"></div>
       </div>
       <div class="mock-timer-wrap">
-        <div class="small text-secondary">Section time</div>
+        <div id="mockTimerLabel" class="small text-secondary">Section time</div>
         <div id="mockTimer" class="mock-timer">30:00</div>
       </div>
     </div>

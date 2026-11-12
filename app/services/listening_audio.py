@@ -21,8 +21,9 @@ TTL_UNSUBMITTED = 2 * 60 * 60
 TTL_AFTER_CHECK = 30 * 60
 MAX_ENTRIES = 25  # keeps memory small on a free Render instance (~1 MB per test)
 
-FEMALE_VOICES = ["marin", "coral"]
-MALE_VOICES = ["cedar", "ash"]
+FEMALE_VOICES = ["marin", "coral", "shimmer"]
+MALE_VOICES = ["cedar", "ash", "echo"]
+NARRATOR_VOICE = "sage"  # exam announcements (IELTS mock)
 
 PACE = {
     "A1": "Speak slowly and very clearly, with short pauses between sentences.",
@@ -84,6 +85,23 @@ def join_mp3(segments: list[bytes]) -> bytes:
     return b"".join(_strip_mp3(s) for s in segments if s)
 
 
+def mp3_duration(data: bytes) -> float:
+    """Length of an MP3 in seconds, counted frame by frame (works for joined files)."""
+    data = _strip_mp3(data)
+    pos, seconds = 0, 0.0
+    while pos + 4 <= len(data):
+        header = data[pos:pos + 4]
+        length = _frame_length(header)
+        if not length:
+            pos += 1
+            continue
+        version_bits = (header[1] >> 3) & 0x03
+        sample_rate = _SAMPLE_RATES[version_bits][(header[2] >> 2) & 0x03]
+        seconds += (1152 if version_bits == 3 else 576) / sample_rate
+        pos += length
+    return seconds
+
+
 # ---------------------------------------------------------------- synthesis
 
 def _voice_map(speakers: list[dict]) -> dict[str, str]:
@@ -103,7 +121,7 @@ def build_audio(test: dict) -> bytes:
         "monologue": "This is part of a natural spoken talk.",
         "announcement": "This is a public announcement or recorded message; use a clear announcer style.",
     }.get(fmt, "")
-    instructions = f"{PACE.get(test.get('level'), PACE['B1'])} {style} Do not add any words."
+    instructions = test.get("voice_instructions") or f"{PACE.get(test.get('level'), PACE['B1'])} {style} Do not add any words."
 
     # Merge consecutive lines of the same speaker into one request.
     chunks: list[tuple[str, str]] = []
@@ -114,8 +132,16 @@ def build_audio(test: dict) -> bytes:
         else:
             chunks.append((voice, line["text"]))
 
+    narrator = ("Read this as the calm, neutral narrator of an English listening exam. "
+                "Speak clearly at a moderate pace. Do not add any words.")
+    jobs = [(v, t, instructions) for v, t in chunks]
+    if test.get("intro"):
+        jobs.insert(0, (NARRATOR_VOICE, test["intro"], narrator))
+    if test.get("outro"):
+        jobs.append((NARRATOR_VOICE, test["outro"], narrator))
+
     with ThreadPoolExecutor(max_workers=4) as pool:
-        parts = list(pool.map(lambda c: synthesize_speech(c[1], voice=c[0], instructions=instructions), chunks))
+        parts = list(pool.map(lambda j: synthesize_speech(j[1], voice=j[0], instructions=j[2]), jobs))
     return join_mp3(parts)
 
 
