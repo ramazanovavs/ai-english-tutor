@@ -133,6 +133,9 @@ function renderDashboard() {
 
   document.getElementById("navLevel").textContent =
     profile.cefr_level || "Not assessed";
+  document.getElementById("navEmail").textContent =
+    currentProfile.email || currentSession?.user?.email || "";
+  document.getElementById("navAdmin").classList.toggle("d-none", !currentProfile.is_admin);
 
   const masteryLabel = (s) => {
     if (!s.mastery_status) return "";
@@ -1527,14 +1530,20 @@ let listeningBankTimer = null;
 async function loadListeningBankPanel() {
   const box = document.getElementById("listeningAdmin");
   if (!box || !currentSession) return;
+  if (!currentProfile?.is_admin) { box.innerHTML = ""; return; }  // students never see the panel
   let d;
   try {
     const res = await fetch("/api/listening/bank/status", {
       headers: {"Authorization": `Bearer ${currentSession.access_token}`}
     });
-    if (!res.ok) { box.innerHTML = ""; return; }  // not an admin
-    d = await res.json();
-  } catch { return; }
+    d = await res.json().catch(() => ({}));
+    if (!res.ok) d = {error: d.detail || `Backup bank status failed (${res.status}).`};
+  } catch (e) { d = {error: e.message}; }
+  if (d.error) {
+    box.innerHTML = `<div class="card-soft"><h5 class="mb-1">Backup bank <span class="badge text-bg-secondary">admin</span></h5>
+      <div class="alert alert-warning small mb-0 mt-2">${esc(d.error)}</div></div>`;
+    return;
+  }
   const per = d.per_level || 5;
   box.innerHTML = `
     <div class="card-soft">

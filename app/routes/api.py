@@ -115,7 +115,10 @@ class TTSPayload(BaseModel):
 @router.get("/me")
 def me(user=Depends(require_user)):
     ensure_profile(user["id"], user.get("email"))
-    return get_student_context(user["id"])
+    context = get_student_context(user["id"])
+    context["email"] = user.get("email")
+    context["is_admin"] = _is_admin(user)
+    return context
 
 
 @router.post("/chat")
@@ -699,16 +702,33 @@ def listening_submit(payload: ListeningSubmitPayload, user=Depends(require_user)
     }
 
 
+def _admin_emails() -> set[str]:
+    # Tolerate spaces, quotes and ";" separators in the ADMIN_EMAILS setting.
+    raw = get_settings().admin_emails.replace(";", ",")
+    return {e.strip().strip('"').strip("'").strip().lower() for e in raw.split(",") if e.strip()}
+
+
+def _is_admin(user: dict) -> bool:
+    return (user.get("email") or "").strip().lower() in _admin_emails()
+
+
 def _require_admin(user: dict) -> None:
-    allowed = {e.strip().lower() for e in get_settings().admin_emails.split(",") if e.strip()}
-    if (user.get("email") or "").lower() not in allowed:
+    if not _is_admin(user):
         raise HTTPException(status_code=403, detail="Admin only.")
 
 
 @router.get("/listening/bank/status")
 def listening_bank_status(user=Depends(require_user)):
     _require_admin(user)
-    return listening_bank.fill_status()
+    try:
+        return listening_bank.fill_status()
+    except Exception as exc:
+        logger.exception("Backup bank status failed")
+        return {
+            "error": "The backup bank is not set up in Supabase yet. Run database/listening_bank.sql "
+                     f"in the Supabase SQL Editor. Details: {exc}",
+            "counts": {}, "per_level": listening_bank.BANK_PER_LEVEL, "running": False,
+        }
 
 
 @router.post("/listening/bank/fill")
