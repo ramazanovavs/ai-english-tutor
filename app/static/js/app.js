@@ -51,9 +51,39 @@ async function apiForm(path, formData) {
   return data;
 }
 
+// iOS Safari only lets audio play if play() is called directly from the tap.
+// After an await (fetch) the tap "expires" and play() fails with NotAllowedError.
+// So: create the <audio> element and unlock it synchronously on the tap,
+// then load the real recording into the same element after the fetch.
+const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
+
+function unlockAudio(el = null) {
+  const audio = el || new Audio();
+  audio.src = SILENT_WAV;
+  const p = audio.play();
+  if (p && p.catch) p.catch(() => {});
+  return audio;
+}
+
+// Plays the element; if the browser still blocks it, shows a button that
+// starts playback from a fresh tap instead of losing the attempt.
+async function playWithTapFallback(audio, container) {
+  try {
+    await audio.play();
+  } catch (e) {
+    if (e.name !== "NotAllowedError" || !container) throw e;
+    const b = document.createElement("button");
+    b.className = "btn btn-sm btn-primary ms-2";
+    b.textContent = "▶ Нажмите, чтобы слушать";
+    b.onclick = () => { b.remove(); audio.play(); };
+    container.appendChild(b);
+  }
+}
+
 async function speakText(text, button = null) {
   if (!text || !currentSession) return;
   const oldLabel = button ? button.textContent : null;
+  const audio = unlockAudio();
   if (button) {
     button.disabled = true;
     button.textContent = "Generating audio…";
@@ -73,9 +103,9 @@ async function speakText(text, button = null) {
     }
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
+    audio.src = url;
     audio.onended = () => URL.revokeObjectURL(url);
-    await audio.play();
+    await playWithTapFallback(audio, button?.parentElement);
   } catch (e) {
     alert(e.message);
   } finally {
@@ -1019,6 +1049,7 @@ async function playIELTSListening() {
   if (!currentIELTSListening?.test_id) return alert("Generate a listening set first.");
   const btn = document.getElementById("ieltsListenAudioBtn");
   const state = document.getElementById("ieltsListenState");
+  const audio = unlockAudio();
   btn.disabled = true;
   btn.textContent = "Loading recording…";
   try {
@@ -1032,7 +1063,7 @@ async function playIELTSListening() {
       throw new Error(d.detail || `Could not load the recording (${res.status}).`);
     }
     const url = URL.createObjectURL(await res.blob());
-    const audio = new Audio(url);
+    audio.src = url;
     btn.textContent = "Playing…";
     if (state) state.textContent = "The recording is playing. It will not be repeated.";
     audio.onended = () => {
@@ -1040,7 +1071,7 @@ async function playIELTSListening() {
       if (state) state.textContent = "Recording finished. Complete your answers and submit.";
       URL.revokeObjectURL(url);
     };
-    await audio.play();
+    await playWithTapFallback(audio, btn.parentElement);
   } catch (e) {
     if (state) state.textContent = e.message; else alert(e.message);
   }
@@ -1945,6 +1976,7 @@ async function playListening() {
   const pauseBtn = document.getElementById("listeningPauseBtn");
   const bar = document.getElementById("listeningProgress");
   stopListeningAudio();
+  const audio = unlockAudio();
   btn.disabled = true;
   btn.textContent = "Loading audio…";
   try {
@@ -1961,7 +1993,7 @@ async function playListening() {
     const left = res.headers.get("X-Plays-Left");
     if (left !== null) listeningPlaysLeft = Number(left);
     const url = URL.createObjectURL(await res.blob());
-    const audio = new Audio(url);
+    audio.src = url;
     listeningAudio = audio;
     audio.ontimeupdate = () => {
       if (audio.duration && isFinite(audio.duration)) bar.style.width = `${(audio.currentTime / audio.duration) * 100}%`;
@@ -1975,7 +2007,7 @@ async function playListening() {
     pauseBtn.textContent = "⏸ Pause";
     pauseBtn.classList.remove("d-none");
     updateListeningPlayInfo();
-    await audio.play();
+    await playWithTapFallback(audio, document.getElementById("listeningPlayInfo"));
   } catch (e) {
     stopListeningAudio();
     document.getElementById("listeningPlayInfo").innerHTML =
