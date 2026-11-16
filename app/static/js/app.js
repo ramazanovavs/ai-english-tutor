@@ -3998,15 +3998,21 @@ function renderFeedback(mine) {
           <div class="small text-secondary">${esc(T("fb_rating_hint"))}</div></div>
         <div class="col-12"><label class="form-label">${esc(T("fb_comment"))}</label>
           <textarea id="fbComment" class="form-control" rows="6" maxlength="5000" placeholder="${esc(T("fb_comment_ph"))}"></textarea></div>
+        <div class="col-12"><label class="form-label">${esc(T("fb_shots"))}</label>
+          <input id="fbFiles" type="file" class="form-control" accept="image/png,image/jpeg,image/webp" multiple onchange="addFeedbackFiles(this.files); this.value=''">
+          <div class="small text-secondary mt-1">${esc(T("fb_shots_hint"))}</div>
+          <div class="small text-warning-emphasis mt-1">⚠️ ${esc(T("fb_shots_privacy"))}</div>
+          <div id="fbShots" class="d-flex gap-2 flex-wrap mt-2"></div></div>
         <div class="col-12"><button id="fbSend" class="btn btn-primary" onclick="sendFeedback()">${esc(T("fb_send"))}</button></div>
       </div>
     </div>
     <div class="card-soft mt-4"><h5>${esc(T("fb_mine"))}</h5>
       ${mine.length ? mine.map(m => `<div class="fb-item"><div class="small text-secondary">${esc(fmtDate(m.created_at))} · ${esc(m.section)} · ${esc(T("fb_kind_" + m.kind).split(" — ")[0])}${m.rating ? " · " + "★".repeat(m.rating) : ""} · <span class="badge text-bg-light">${esc(st(m.status))}</span></div>
-        <div style="white-space:pre-line">${esc(m.comment)}</div></div>`).join("") : `<div class="text-secondary">${esc(T("fb_none"))}</div>`}</div>
+        <div style="white-space:pre-line">${esc(m.comment)}</div>${m.screenshots ? `<div class="small text-secondary">📎 ${esc(T("fb_shots_n", {n: m.screenshots}))}</div>` : ""}</div>`).join("") : `<div class="text-secondary">${esc(T("fb_none"))}</div>`}</div>
     <div id="feedbackAdmin"></div><div id="aiUsageAdmin"></div><div id="calibrationAdmin"></div>`;
   feedbackRating = 0;
   setFeedbackRating(0);
+  renderFeedbackFiles();
   if (feedbackAdmin) renderFeedbackAdmin();
 }
 
@@ -4023,12 +4029,19 @@ async function sendFeedback() {
   const btn = document.getElementById("fbSend");
   btn.disabled = true;
   try {
-    await api("/api/feedback", {method: "POST", body: JSON.stringify({
+    const saved = await api("/api/feedback", {method: "POST", body: JSON.stringify({
       role, section: feedbackSectionLabelRu(document.getElementById("fbSection").value),
       kind: document.getElementById("fbKind").value, rating: feedbackRating || null, comment,
       context: {lang: uiLang(), level: currentProfile?.roadmap?.current || currentProfile?.profile?.cefr_level || "",
                 screen: `${window.innerWidth}x${window.innerHeight}`, agent: navigator.userAgent.slice(0, 150)}})});
-    rmToast(T("fb_thanks"));
+    let failed = 0;
+    for (const f of feedbackFiles) {
+      const form = new FormData();
+      form.append("file", f, f.name || "screenshot.png");
+      try { await apiForm(`/api/feedback/${saved.id}/screenshot`, form); } catch (e) { failed++; rmToast(e.message); }
+    }
+    feedbackFiles = [];
+    rmToast(failed ? T("fb_shots_failed", {n: failed}) : T("fb_thanks"));
     loadFeedback();
   } catch (e) { rmToast(e.message); btn.disabled = false; }
 }
@@ -4057,8 +4070,10 @@ function renderFeedbackAdmin() {
     ${items.map(x => `<div class="fb-item">
       <div class="small text-secondary">${esc(fmtDate(x.created_at))} · ${esc(x.email || "")} · ${esc(roleName(x.role))} · <strong>${esc(x.section)}</strong> · ${esc(T("fb_kind_" + x.kind).split(" — ")[0])}${x.rating ? " · " + "★".repeat(x.rating) : ""}${x.context?.level ? " · " + esc(x.context.level) : ""}</div>
       <div style="white-space:pre-line">${esc(x.comment)}</div>
+      ${(x.context?.screenshots || []).length ? `<div class="d-flex gap-2 flex-wrap mt-1">${x.context.screenshots.map((_, i) => `<img class="fb-thumb" data-fb="${esc(x.id)}" data-n="${i + 1}" alt="screenshot ${i + 1}" onclick="openFeedbackShot(this)">`).join("")}</div>` : ""}
       <div class="d-flex gap-1 mt-1">${["new", "seen", "done"].map(st => `<button class="btn btn-sm ${x.status === st ? "btn-secondary" : "btn-outline-secondary"}" onclick="setFeedbackStatus('${x.id}','${st}')">${esc(T("fb_st_" + st))}</button>`).join("")}</div>
     </div>`).join("")}</div>`;
+  loadFeedbackShots();
 }
 
 async function setFeedbackStatus(id, status) {
@@ -4207,4 +4222,62 @@ async function runCalibration() {
 async function setCalibrationBaseline(id) {
   try { await api(`/api/admin/calibration/${id}/baseline`, {method: "POST", body: "{}"}); loadCalibrationAdmin(); }
   catch (e) { rmToast(e.message); }
+}
+
+// ----- screenshots in feedback -----
+let feedbackFiles = [];
+const FB_MAX_FILES = 3, FB_MAX_BYTES = 8 * 1024 * 1024;
+Object.assign(RM_T, {
+  fb_shots: {ru: "Скриншоты (необязательно, до 3)", kk: "Скриншоттар (міндетті емес, 3-ке дейін)", en: "Screenshots (optional, up to 3)"},
+  fb_shots_hint: {ru: "PNG, JPEG или WebP до 8 МБ. Можно вставить скриншот прямо в форму сочетанием Ctrl+V.", kk: "PNG, JPEG немесе WebP, 8 МБ-қа дейін. Скриншотты Ctrl+V арқылы тікелей формаға қоюға болады.", en: "PNG, JPEG or WebP up to 8 MB. You can also paste a screenshot into the form with Ctrl+V."},
+  fb_shots_privacy: {ru: "Не прикладывайте скриншоты с паролями, чужими данными и личной перепиской. Скриншоты видит только администратор, они хранятся 90 дней.", kk: "Құпиясөздер, басқалардың деректері және жеке хат-хабар бар скриншоттарды тіркемеңіз. Скриншоттарды тек әкімші көреді, олар 90 күн сақталады.", en: "Do not attach screenshots with passwords, other people's data or private messages. Only the admin sees them; they are kept for 90 days."},
+  fb_shots_type: {ru: "Можно прикрепить только изображения PNG, JPEG или WebP.", kk: "Тек PNG, JPEG немесе WebP суреттерін тіркеуге болады.", en: "Only PNG, JPEG or WebP images can be attached."},
+  fb_shots_big: {ru: "Файл больше 8 МБ.", kk: "Файл 8 МБ-тан үлкен.", en: "The file is larger than 8 MB."},
+  fb_shots_max: {ru: "Не больше 3 скриншотов к одному отзыву.", kk: "Бір пікірге 3 скриншоттан артық емес.", en: "Up to 3 screenshots per feedback."},
+  fb_shots_n: {ru: "скриншотов: {n}", kk: "скриншот: {n}", en: "{n} screenshot(s)"},
+  fb_shots_failed: {ru: "Отзыв сохранён, но {n} скриншот(а) не загрузились.", kk: "Пікір сақталды, бірақ {n} скриншот жүктелмеді.", en: "Feedback saved, but {n} screenshot(s) could not be uploaded."},
+  fb_remove: {ru: "Убрать", kk: "Алып тастау", en: "Remove"},
+});
+
+function addFeedbackFiles(list) {
+  for (const f of Array.from(list || [])) {
+    if (!["image/png", "image/jpeg", "image/webp"].includes(f.type)) { rmToast(T("fb_shots_type")); continue; }
+    if (f.size > FB_MAX_BYTES) { rmToast(T("fb_shots_big")); continue; }
+    if (feedbackFiles.length >= FB_MAX_FILES) { rmToast(T("fb_shots_max")); break; }
+    feedbackFiles.push(f);
+  }
+  renderFeedbackFiles();
+}
+
+function renderFeedbackFiles() {
+  const box = document.getElementById("fbShots");
+  if (!box) return;
+  box.querySelectorAll("img").forEach(img => URL.revokeObjectURL(img.src));
+  box.innerHTML = feedbackFiles.map((f, i) => `<div class="fb-shot"><img src="${URL.createObjectURL(f)}" alt="">
+    <button type="button" class="btn btn-sm btn-light" onclick="feedbackFiles.splice(${i},1);renderFeedbackFiles()" title="${esc(T("fb_remove"))}">✕</button></div>`).join("");
+}
+
+// Ctrl+V on the feedback page attaches the screenshot from the clipboard
+document.addEventListener("paste", e => {
+  if (document.getElementById("page-feedback")?.classList.contains("d-none")) return;
+  const files = Array.from(e.clipboardData?.files || []).filter(f => f.type.startsWith("image/"));
+  if (files.length) { e.preventDefault(); addFeedbackFiles(files); }
+});
+
+// Admin: screenshots are fetched with the login token and shown from memory (never a public link)
+async function loadFeedbackShots() {
+  for (const img of document.querySelectorAll("img.fb-thumb:not([src])")) {
+    try {
+      const res = await fetch(`/api/admin/feedback/${img.dataset.fb}/screenshot/${img.dataset.n}`,
+                              {headers: {"Authorization": `Bearer ${currentSession.access_token}`}});
+      if (!res.ok) { img.alt = res.status === 404 ? "deleted" : "error"; img.src = "data:,"; continue; }
+      img.src = URL.createObjectURL(await res.blob());
+    } catch (e) { img.src = "data:,"; }
+  }
+}
+
+function openFeedbackShot(img) {
+  if (!img.src || img.src.startsWith("data:")) return;
+  const w = window.open();
+  if (w) { w.opener = null; w.document.title = img.alt; const big = w.document.createElement("img"); big.src = img.src; big.style.maxWidth = "100%"; w.document.body.appendChild(big); }
 }

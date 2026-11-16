@@ -7,3 +7,4 @@ openai>=1.60,<3.0
 supabase>=2.10,<3.0
 python-multipart>=0.0.18,<1.0
 av>=12
+pillow>=10.4,<13

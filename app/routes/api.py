@@ -6,7 +6,7 @@ from typing import Literal
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel, Field
 
 from app.services.supabase_service import require_user, admin_db
@@ -2631,7 +2631,15 @@ def _feedback_rows(user_id: str | None = None) -> list[dict]:
 
 @router.post("/feedback")
 def feedback_send(payload: FeedbackPayload, user=Depends(require_user)):
-    context = {k: str(v)[:200] for k, v in list(payload.context.items())[:10]}
+    context = {k: str(v)[:200] for k, v in list(payload.context.items())[:10] if k != "screenshots"}
+    try:
+        since = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        today = admin_db().table("feedback").select("id").eq("user_id", user["id"]).gte("created_at", since) \
+            .execute().data or []
+    except Exception:
+        today = []
+    if len(today) >= 30:
+        raise HTTPException(status_code=429, detail="Too many feedback messages today. Please continue tomorrow.")
     try:
         row = admin_db().table("feedback").insert({
             "user_id": user["id"], "email": user.get("email"), "role": payload.role,
@@ -2644,14 +2652,61 @@ def feedback_send(payload: FeedbackPayload, user=Depends(require_user)):
     return {"id": row.data[0]["id"], "saved": True}
 
 
+@router.post("/feedback/{feedback_id}/screenshot")
+async def feedback_screenshot(feedback_id: str, file: UploadFile = File(...), user=Depends(require_user)):
+    """Attach a screenshot to the learner's own feedback (up to 3, within an hour after sending it)."""
+    from app.services import screenshots
+    data = await file.read(screenshots.MAX_BYTES + 1)
+    rows = admin_db().table("feedback").select("id,user_id,context,created_at").eq("id", feedback_id) \
+        .eq("user_id", user["id"]).limit(1).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Feedback not found.")
+    row = rows[0]
+    created = datetime.fromisoformat(str(row.get("created_at")).replace("Z", "+00:00"))
+    if datetime.now(timezone.utc) - created > timedelta(hours=1):
+        raise HTTPException(status_code=409, detail="Screenshots can be added within an hour after sending feedback.")
+    context = row.get("context") or {}
+    shots = list(context.get("screenshots") or [])
+    if len(shots) >= screenshots.MAX_FILES:
+        raise HTTPException(status_code=409, detail="Up to 3 screenshots per feedback.")
+    from starlette.concurrency import run_in_threadpool
+    try:
+        clean = await run_in_threadpool(screenshots.sanitize, data)
+    except screenshots.BadImage as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    path = screenshots.path_for(feedback_id, len(shots) + 1)
+    admin_db().storage.from_(screenshots.BUCKET).upload(path, clean, {"content-type": "image/jpeg", "upsert": "true"})
+    shots.append(path)
+    context["screenshots"] = shots
+    admin_db().table("feedback").update({"context": context}).eq("id", feedback_id).execute()
+    return {"count": len(shots)}
+
+
+@router.get("/admin/feedback/{feedback_id}/screenshot/{n}")
+def admin_feedback_screenshot(feedback_id: str, n: int, user=Depends(require_user)):
+    _require_admin(user)
+    from app.services import screenshots
+    rows = admin_db().table("feedback").select("context").eq("id", feedback_id).limit(1).execute().data
+    shots = ((rows or [{}])[0].get("context") or {}).get("screenshots") or []
+    if not 1 <= n <= len(shots):
+        raise HTTPException(status_code=404, detail="Screenshot not found.")
+    try:
+        data = admin_db().storage.from_(screenshots.BUCKET).download(shots[n - 1])
+    except Exception:
+        raise HTTPException(status_code=404, detail="The screenshot was deleted (kept for 90 days).")
+    return Response(content=data, media_type="image/jpeg",
+                    headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+                             "Content-Disposition": f'inline; filename="feedback-{n}.jpg"'})
+
+
 @router.get("/feedback/mine")
 def feedback_mine(user=Depends(require_user)):
     try:
         rows = _feedback_rows(user["id"])
     except Exception:
         return {"items": []}
-    return {"items": [{k: r.get(k) for k in ("id", "section", "kind", "rating", "comment", "status", "created_at")}
-                      for r in rows]}
+    return {"items": [{**{k: r.get(k) for k in ("id", "section", "kind", "rating", "comment", "status", "created_at")},
+                       "screenshots": len((r.get("context") or {}).get("screenshots") or [])} for r in rows]}
 
 
 @router.get("/admin/feedback")
@@ -2693,7 +2748,7 @@ def admin_feedback_csv(user=Depends(require_user)):
     rows = _feedback_rows()
     buf = io.StringIO()
     w = csv.writer(buf, delimiter=";")
-    w.writerow(["Дата", "Email", "Роль", "Раздел", "Тип", "Оценка", "Замечание", "Язык", "Уровень", "Статус", "Заметка"])
+    w.writerow(["Дата", "Email", "Роль", "Раздел", "Тип", "Оценка", "Замечание", "Язык", "Уровень", "Статус", "Заметка", "Скриншотов"])
     def cell(v):
         # cells starting with = + - @ would run as formulas in Excel (CSV injection)
         v = "" if v is None else str(v)
@@ -2703,7 +2758,7 @@ def admin_feedback_csv(user=Depends(require_user)):
         ctx = r.get("context") or {}
         w.writerow([cell(x) for x in [str(r.get("created_at") or "")[:16].replace("T", " "), r.get("email"), r.get("role"), r.get("section"),
                     r.get("kind"), r.get("rating") or "", r.get("comment"), ctx.get("lang", ""), ctx.get("level", ""),
-                    r.get("status"), r.get("admin_note") or ""]])
+                    r.get("status"), r.get("admin_note") or "", len(ctx.get("screenshots") or [])]])
     data = "﻿" + buf.getvalue()
     return StreamingResponse(BytesIO(data.encode("utf-8")), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": "attachment; filename=feedback.csv"})

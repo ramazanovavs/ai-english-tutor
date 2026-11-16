@@ -4,7 +4,8 @@ Automatic deletion of old audio in Supabase Storage (bucket "listening-audio").
 Deleted after RETENTION_DAYS:
 * full mock: the four Listening recordings and the candidate's Speaking answers
   (completed or abandoned mocks, and mocks left unfinished for that long);
-* practice Speaking: the candidate's answers.
+* practice Speaking: the candidate's answers;
+* screenshots attached to feedback (after 90 days).
 Never deleted: the IELTS bank and the Listening bank (they have their own copies), stored examiner
 phrases, and recordings whose assessment is still waiting for the AI service.
 Texts, transcripts, scores and reviews stay in the database.
@@ -100,6 +101,25 @@ def run() -> dict:
         except Exception:
             logger.exception("Could not clean speaking session %s", s["id"])
             result["errors"] += 1
+
+    result["feedback_screenshots"] = 0
+    try:
+        from app.services import screenshots
+        old = (datetime.now(timezone.utc) - timedelta(days=screenshots.RETENTION_DAYS)).isoformat()
+        rows = admin_db().table("feedback").select("id,context,created_at").lt("created_at", old).execute().data or []
+        for r in rows:
+            ctx = r.get("context") or {}
+            shots = ctx.get("screenshots") or []
+            if not shots:
+                continue
+            result["files"] += _remove(shots)
+            ctx["screenshots"] = []
+            ctx["screenshots_deleted"] = len(shots)
+            admin_db().table("feedback").update({"context": ctx}).eq("id", r["id"]).execute()
+            result["feedback_screenshots"] += len(shots)
+    except Exception:
+        logger.exception("Could not clean feedback screenshots")
+        result["errors"] += 1
 
     result["ran_at"] = datetime.now(timezone.utc).isoformat()
     result["retention_days"] = RETENTION_DAYS
