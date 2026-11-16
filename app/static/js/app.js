@@ -3911,6 +3911,8 @@ async function addReadingWords() {
 
 // ========================= Feedback from testers =========================
 let feedbackFromPage = "dashboard", feedbackRating = 0, feedbackAdmin = null, feedbackFilter = {status: "", section: ""};
+const FEEDBACK_PAGE = 50;
+let feedbackShown = FEEDBACK_PAGE;   // admin list: how many feedback items are on the page now
 Object.assign(RM_T, {
   m_feedback: {ru: "💬 Обратная связь", kk: "💬 Кері байланыс", en: "💬 Feedback"},
   fb_fab: {ru: "💬 Отзыв", kk: "💬 Пікір", en: "💬 Feedback"},
@@ -3946,6 +3948,8 @@ Object.assign(RM_T, {
   fb_summary: {ru: "Сводка по разделам", kk: "Бөлімдер бойынша жиынтық", en: "Summary by section"},
   fb_count: {ru: "Отзывов", kk: "Пікірлер", en: "Count"},
   fb_avg: {ru: "Средняя оценка", kk: "Орташа баға", en: "Average rating"},
+  fb_more: {ru: "Показать ещё", kk: "Тағы көрсету", en: "Show more"},
+  fb_shown: {ru: "Показано {n} из {t}", kk: "{t}-тің {n}-і көрсетілді", en: "Showing {n} of {t}"},
   fb_all: {ru: "Все", kk: "Барлығы", en: "All"},
 });
 
@@ -4062,17 +4066,20 @@ function renderFeedbackAdmin() {
       <button class="btn btn-sm btn-outline-primary" onclick="downloadFeedbackCsv()">${esc(T("fb_download"))}</button></div>
     <h6 class="mt-3">${esc(T("fb_summary"))}</h6>
     <table class="table table-sm"><thead><tr><th></th><th>${esc(T("fb_count"))}</th><th>${esc(T("fb_avg"))}</th></tr></thead><tbody>
-      ${d.summary.map(s => `<tr><td><a href="#" onclick="feedbackFilter.section=${esc(JSON.stringify(s.section))};renderFeedbackAdmin();return false">${esc(s.section)}</a></td><td>${s.count}</td><td>${s.avg_rating ?? "—"}</td></tr>`).join("")}</tbody></table>
+      ${d.summary.map(s => `<tr><td><a href="#" onclick="feedbackFilter.section=${esc(JSON.stringify(s.section))};feedbackShown=FEEDBACK_PAGE;renderFeedbackAdmin();return false">${esc(s.section)}</a></td><td>${s.count}</td><td>${s.avg_rating ?? "—"}</td></tr>`).join("")}</tbody></table>
     <div class="d-flex gap-2 flex-wrap mb-2">
-      ${["", "new", "seen", "done"].map(st => `<button class="btn btn-sm ${feedbackFilter.status === st ? "btn-primary" : "btn-outline-secondary"}" onclick="feedbackFilter.status='${st}';renderFeedbackAdmin()">${esc(st ? T("fb_st_" + st) : T("fb_all"))}</button>`).join("")}
-      ${feedbackFilter.section ? `<button class="btn btn-sm btn-warning" onclick="feedbackFilter.section='';renderFeedbackAdmin()">${esc(feedbackFilter.section)} ✕</button>` : ""}
+      ${["", "new", "seen", "done"].map(st => `<button class="btn btn-sm ${feedbackFilter.status === st ? "btn-primary" : "btn-outline-secondary"}" onclick="feedbackFilter.status='${st}';feedbackShown=FEEDBACK_PAGE;renderFeedbackAdmin()">${esc(st ? T("fb_st_" + st) : T("fb_all"))}</button>`).join("")}
+      ${feedbackFilter.section ? `<button class="btn btn-sm btn-warning" onclick="feedbackFilter.section='';feedbackShown=FEEDBACK_PAGE;renderFeedbackAdmin()">${esc(feedbackFilter.section)} ✕</button>` : ""}
     </div>
-    ${items.map(x => `<div class="fb-item">
+    ${items.slice(0, feedbackShown).map(x => `<div class="fb-item">
       <div class="small text-secondary">${esc(fmtDate(x.created_at))} · ${esc(x.email || "")} · ${esc(roleName(x.role))} · <strong>${esc(x.section)}</strong> · ${esc(T("fb_kind_" + x.kind).split(" — ")[0])}${x.rating ? " · " + "★".repeat(x.rating) : ""}${x.context?.level ? " · " + esc(x.context.level) : ""}</div>
       <div style="white-space:pre-line">${esc(x.comment)}</div>
       ${(x.context?.screenshots || []).length ? `<div class="d-flex gap-2 flex-wrap mt-1">${x.context.screenshots.map((_, i) => `<img class="fb-thumb" data-fb="${esc(x.id)}" data-n="${i + 1}" alt="screenshot ${i + 1}" onclick="openFeedbackShot(this)">`).join("")}</div>` : ""}
       <div class="d-flex gap-1 mt-1">${["new", "seen", "done"].map(st => `<button class="btn btn-sm ${x.status === st ? "btn-secondary" : "btn-outline-secondary"}" onclick="setFeedbackStatus('${x.id}','${st}')">${esc(T("fb_st_" + st))}</button>`).join("")}</div>
-    </div>`).join("")}</div>`;
+    </div>`).join("")}
+    ${items.length > feedbackShown ? `<div class="text-center mt-3">
+      <button class="btn btn-outline-primary" onclick="feedbackShown+=FEEDBACK_PAGE;renderFeedbackAdmin()">${esc(T("fb_more"))}</button>
+      <div class="small text-secondary mt-1">${esc(T("fb_shown", {n: Math.min(feedbackShown, items.length), t: items.length}))}</div></div>` : ""}</div>`;
   loadFeedbackShots();
 }
 
