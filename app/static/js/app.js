@@ -116,15 +116,31 @@ async function speakText(text, button = null) {
   }
 }
 
+// Turns Supabase Auth errors into a clear message in the interface language.
+// Unknown errors fall back to Supabase's own text.
+function authErrorText(error) {
+  const code = error?.code || "";
+  const msg = String(error?.message || "").toLowerCase();
+  if (code === "over_email_send_rate_limit" || msg.includes("email rate limit")) return T("auth_err_email_limit");
+  if (code === "over_request_rate_limit" || error?.status === 429) return T("auth_err_too_many");
+  if (code === "user_already_exists" || code === "email_exists" || msg.includes("already registered")) return T("auth_err_exists");
+  if (code === "invalid_credentials" || msg.includes("invalid login credentials")) return T("auth_err_credentials");
+  if (code === "email_not_confirmed" || msg.includes("email not confirmed")) return T("auth_err_not_confirmed");
+  if (code === "weak_password" || msg.includes("password should be")) return T("auth_err_weak_password");
+  if (code === "validation_failed" || msg.includes("invalid format") || msg.includes("unable to validate email")) return T("auth_err_bad_email");
+  if (error?.status === 0) return T("auth_err_network");
+  return error?.message || T("auth_err_generic");
+}
+
 async function signUp() {
   const email = document.getElementById("email").value.trim();
   const password = document.getElementById("password").value;
   const { data, error } = await sb.auth.signUp({email, password});
   const el = document.getElementById("authMsg");
-  if (error) return el.innerHTML = `<span class="text-danger">${esc(error.message)}</span>`;
+  if (error) return el.innerHTML = `<span class="text-danger">${esc(authErrorText(error))}</span>`;
   el.innerHTML = data.session
-    ? `<span class="text-success">Account created.</span>`
-    : `<span class="text-success">Account created. Check your email to confirm it.</span>`;
+    ? `<span class="text-success">${esc(T("auth_created"))}</span>`
+    : `<span class="text-success">${esc(T("auth_created_confirm"))}</span>`;
 }
 
 async function signIn() {
@@ -132,7 +148,7 @@ async function signIn() {
   const password = document.getElementById("password").value;
   const { data, error } = await sb.auth.signInWithPassword({email, password});
   if (error) {
-    document.getElementById("authMsg").innerHTML = `<span class="text-danger">${esc(error.message)}</span>`;
+    document.getElementById("authMsg").innerHTML = `<span class="text-danger">${esc(authErrorText(error))}</span>`;
     return;
   }
   currentSession = data.session;
@@ -2870,6 +2886,17 @@ function learnTab(kind, name, btn) {
 
 // ========================= Level roadmap ("Мой путь") and placement test =========================
 const RM_T = {
+  auth_created: {ru: "Аккаунт создан.", kk: "Аккаунт құрылды.", en: "Account created."},
+  auth_created_confirm: {ru: "Аккаунт создан. Подтвердите его по ссылке из письма.", kk: "Аккаунт құрылды. Хаттағы сілтеме арқылы растаңыз.", en: "Account created. Check your email to confirm it."},
+  auth_err_email_limit: {ru: "Сейчас слишком много регистраций. Попробуйте через час или напишите преподавателю.", kk: "Қазір тіркелу тым көп. Бір сағаттан кейін қайталаңыз немесе оқытушыға жазыңыз.", en: "Too many sign-ups right now. Please try again in an hour or contact your teacher."},
+  auth_err_too_many: {ru: "Слишком много попыток. Подождите минуту и попробуйте снова.", kk: "Әрекет тым көп. Бір минут күтіп, қайталаңыз.", en: "Too many attempts. Wait a minute and try again."},
+  auth_err_exists: {ru: "Этот email уже зарегистрирован. Нажмите «Войти».", kk: "Бұл email тіркелген. «Кіру» батырмасын басыңыз.", en: "This email is already registered. Please sign in."},
+  auth_err_credentials: {ru: "Неверный email или пароль.", kk: "Email немесе құпиясөз қате.", en: "Wrong email or password."},
+  auth_err_not_confirmed: {ru: "Email ещё не подтверждён. Откройте ссылку из письма.", kk: "Email әлі расталмаған. Хаттағы сілтемені ашыңыз.", en: "Your email is not confirmed yet. Open the link in the email we sent."},
+  auth_err_weak_password: {ru: "Пароль слишком простой: минимум 6 символов.", kk: "Құпиясөз тым қарапайым: кемінде 6 таңба.", en: "Password is too weak: at least 6 characters."},
+  auth_err_bad_email: {ru: "Проверьте адрес email.", kk: "Email мекенжайын тексеріңіз.", en: "Please check the email address."},
+  auth_err_network: {ru: "Нет связи с сервером. Проверьте интернет.", kk: "Сервермен байланыс жоқ. Интернетті тексеріңіз.", en: "Cannot reach the server. Check your internet connection."},
+  auth_err_generic: {ru: "Не удалось войти. Попробуйте ещё раз.", kk: "Кіру мүмкін болмады. Қайталап көріңіз.", en: "Sign-in failed. Please try again."},
   menu: {ru: "🧭 Мой путь", kk: "🧭 Менің жолым", en: "🧭 My path"},
   title: {ru: "Мой путь в английском", kk: "Ағылшын тіліндегі менің жолым", en: "My English path"},
   intro_title: {ru: "Определим ваш уровень", kk: "Деңгейіңізді анықтайық", en: "Let's find your level"},

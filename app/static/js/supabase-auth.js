@@ -31,7 +31,10 @@
       body?.error_description ||
       body?.error ||
       `Authentication request failed (${status})`;
-    return { message: String(message), status };
+    // Keep Supabase's machine-readable code (e.g. over_email_send_rate_limit)
+    // so the UI can show a friendly, translated message.
+    const code = body?.error_code || body?.code || null;
+    return { message: String(message), status, code };
   }
 
   function makeSession(body) {
