@@ -558,6 +558,7 @@ class ListeningGeneratePayload(BaseModel):
     level: Literal["A1", "A2", "B1", "B2", "C1", "C2"] = "B1"
     topic: str = Field(default="", max_length=100)
     format: Literal["dialogue", "monologue", "announcement"] = "dialogue"
+    accent: Literal["british", "american"] = "british"
     use_backup: bool = False  # learner asked for a backup test after an audio error
 
 
@@ -589,6 +590,7 @@ def _listening_public(test_id: str, test: dict, backup: bool, notice: str = "") 
         "title": test["title"],
         "level": test.get("level"),
         "format": test.get("format"),
+        "accent": test.get("accent"),
         "max_plays": listening_audio.MAX_PLAYS,
         "backup": backup,
         "notice": notice,
@@ -601,7 +603,7 @@ def _listening_public(test_id: str, test: dict, backup: bool, notice: str = "") 
 
 def _listening_from_bank(payload: ListeningGeneratePayload, user: dict, reason: str) -> dict:
     try:
-        row = listening_bank.pick(payload.level, payload.format, user["id"])
+        row = listening_bank.pick(payload.level, payload.format, user["id"], payload.accent)
     except Exception:
         logger.exception("Backup bank is unavailable")
         row = None
@@ -648,6 +650,7 @@ def listening_generate(payload: ListeningGeneratePayload, user=Depends(require_u
     test["level"] = payload.level
     test["format"] = payload.format
     test["topic"] = payload.topic.strip()
+    test["accent"] = payload.accent
 
     row = admin_db().table("tests").insert({
         "user_id": user["id"],

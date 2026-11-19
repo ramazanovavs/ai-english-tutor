@@ -34,6 +34,11 @@ PACE = {
     "C2": "Speak at a fully natural native-speaker pace.",
 }
 
+ACCENT = {
+    "british": "Speak with a natural British English accent (standard Southern British).",
+    "american": "Speak with a natural General American English accent.",
+}
+
 _lock = threading.Lock()
 _cache: dict[str, dict] = {}
 
@@ -122,6 +127,9 @@ def build_audio(test: dict) -> bytes:
         "announcement": "This is a public announcement or recorded message; use a clear announcer style.",
     }.get(fmt, "")
     instructions = test.get("voice_instructions") or f"{PACE.get(test.get('level'), PACE['B1'])} {style} Do not add any words."
+    accent = ACCENT.get(test.get("accent") or "")
+    if accent and not test.get("voice_instructions"):
+        instructions = f"{accent} {instructions}"
 
     # Merge consecutive lines of the same speaker into one request.
     chunks: list[tuple[str, str]] = []

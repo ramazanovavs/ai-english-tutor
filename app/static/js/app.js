@@ -1912,6 +1912,7 @@ async function generateListening(useBackup = false) {
         level: document.getElementById("listeningLevel").value,
         format: document.getElementById("listeningFormat").value,
         topic: document.getElementById("listeningTopic").value.trim(),
+        accent: document.getElementById("listeningAccent")?.value || "british",
         use_backup: useBackup === true
       })
     });
@@ -1935,14 +1936,24 @@ function renderListening() {
       <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
         <div>
           <h4 class="mb-1">${esc(t.title)}</h4>
-          <div class="small text-secondary">${esc(t.level)} · ${esc(formatLabel)} · 10 questions</div>
+          <div class="small text-secondary">${esc(t.level)} · ${esc(formatLabel)}${t.accent ? ` · ${esc(T(t.accent === "american" ? "l_acc_us" : "l_acc_br"))}` : ""} · 10 questions</div>
         </div>
         <div class="d-flex gap-2 align-items-center">
           <button id="listeningPlayBtn" class="btn btn-primary" onclick="playListening()">▶ Play</button>
           <button id="listeningPauseBtn" class="btn btn-outline-secondary d-none" onclick="toggleListeningPause()">⏸ Pause</button>
         </div>
       </div>
-      <div class="progress mt-3" style="height:6px"><div id="listeningProgress" class="progress-bar" style="width:0%"></div></div>
+      <div class="d-flex align-items-center gap-2 mt-3 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" onclick="seekListening(-5)" title="−5 s">⏪ 5 ${esc(T("l_sec"))}</button>
+        <div id="listeningSeek" class="progress flex-grow-1" style="height:10px;cursor:pointer;min-width:160px" title="${esc(T("l_seek_hint"))}"
+             onclick="seekListeningTo(event)"><div id="listeningProgress" class="progress-bar" style="width:0%"></div></div>
+        <button class="btn btn-sm btn-outline-secondary" onclick="seekListening(5)" title="+5 s">5 ${esc(T("l_sec"))} ⏩</button>
+        <span id="listeningTime" class="small text-secondary" style="min-width:80px;text-align:center">0:00 / 0:00</span>
+        <label class="small text-secondary mb-0" for="listeningSpeed">${esc(T("l_speed"))}</label>
+        <select id="listeningSpeed" class="form-select form-select-sm" style="width:auto" onchange="setListeningSpeed(this.value)">
+          ${[0.5, 0.75, 1, 1.25, 1.5, 2].map(v => `<option value="${v}" ${v === listeningSpeed() ? "selected" : ""}>${v}×</option>`).join("")}
+        </select>
+      </div>
       <div id="listeningPlayInfo" class="small text-secondary mt-2"></div>
     </div>
 
@@ -2012,8 +2023,11 @@ async function playListening() {
     const url = URL.createObjectURL(await res.blob());
     audio.src = url;
     listeningAudio = audio;
+    audio.defaultPlaybackRate = audio.playbackRate = listeningSpeed();
+    audio.onloadedmetadata = () => { audio.playbackRate = listeningSpeed(); updateListeningTime(); };
     audio.ontimeupdate = () => {
       if (audio.duration && isFinite(audio.duration)) bar.style.width = `${(audio.currentTime / audio.duration) * 100}%`;
+      updateListeningTime();
     };
     audio.onended = () => {
       bar.style.width = "100%";
@@ -4348,4 +4362,55 @@ async function newChat() {
     chatHistoryLoaded = true;
     document.getElementById("chatInput").focus();
   } catch (e) { rmToast(e.message); }
+}
+
+// ---------- Listening player: speed, rewind, seeking ----------
+Object.assign(RM_T, {
+  l_accent: {ru: "Акцент", kk: "Акцент", en: "Accent"},
+  l_acc_br: {ru: "Британский", kk: "Британдық", en: "British"},
+  l_acc_us: {ru: "Американский", kk: "Американдық", en: "American"},
+  l_speed: {ru: "Скорость", kk: "Жылдамдық", en: "Speed"},
+  l_sec: {ru: "с", kk: "с", en: "s"},
+  l_seek_hint: {ru: "Нажмите на полосу, чтобы перейти к месту записи", kk: "Жазбаның керекті жеріне өту үшін жолақты басыңыз", en: "Click the bar to jump to a place in the recording"},
+  l_sub: {ru: "Прослушайте запись для вашего уровня и ответьте на 10 вопросов. До проверки запись можно включить до 3 раз; во время прослушивания можно перематывать (⏪ 5 с, полоса) и менять скорость 0,5–2×. После проверки открывается текст записи.", kk: "Деңгейіңізге арналған жазбаны тыңдап, 10 сұраққа жауап беріңіз. Тексергенге дейін жазбаны 3 ретке дейін қосуға болады; тыңдау кезінде артқа айналдыруға (⏪ 5 с, жолақ) және жылдамдықты 0,5–2× өзгертуге болады. Тексергеннен кейін мәтіні ашылады.", en: "Listen to a recording made for your level and answer 10 questions. You can start the recording up to 3 times before checking; while it plays you can rewind (⏪ 5 s, the bar) and change the speed 0.5–2×. The transcript opens after checking."},
+});
+
+function listeningSpeed() {
+  let v = 1;
+  try { v = Number(localStorage.getItem("listeningSpeed")) || 1; } catch (e) {}
+  return [0.5, 0.75, 1, 1.25, 1.5, 2].includes(v) ? v : 1;
+}
+
+function setListeningSpeed(v) {
+  v = Number(v) || 1;
+  try { localStorage.setItem("listeningSpeed", String(v)); } catch (e) {}
+  if (listeningAudio) listeningAudio.playbackRate = v;
+}
+
+function fmtTime(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+}
+
+function updateListeningTime() {
+  const el = document.getElementById("listeningTime");
+  if (!el || !listeningAudio) return;
+  const d = listeningAudio.duration;
+  el.textContent = `${fmtTime(listeningAudio.currentTime)} / ${d && isFinite(d) ? fmtTime(d) : "…"}`;
+}
+
+function seekListening(delta) {
+  const a = listeningAudio;
+  if (!a || !a.duration || !isFinite(a.duration)) return;
+  a.currentTime = Math.min(Math.max(0, a.currentTime + delta), Math.max(0, a.duration - 0.1));
+  updateListeningTime();
+}
+
+function seekListeningTo(ev) {
+  const a = listeningAudio;
+  if (!a || !a.duration || !isFinite(a.duration)) return;
+  const r = ev.currentTarget.getBoundingClientRect();
+  const frac = Math.min(Math.max((ev.clientX - r.left) / r.width, 0), 1);
+  a.currentTime = Math.min(frac * a.duration, a.duration - 0.1);
+  updateListeningTime();
 }

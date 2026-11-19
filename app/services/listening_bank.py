@@ -58,7 +58,7 @@ def save_if_needed(test: dict, audio: bytes) -> bool:
             return False
         path = f"{level}/{uuid.uuid4()}.mp3"
         _storage().upload(path, audio, {"content-type": "audio/mpeg", "upsert": "true"})
-        content = {k: test[k] for k in ("title", "speakers", "script", "questions", "level", "format", "topic") if k in test}
+        content = {k: test[k] for k in ("title", "speakers", "script", "questions", "level", "format", "topic", "accent") if k in test}
         try:
             admin_db().table(TABLE).insert({
                 "level": level,
@@ -87,14 +87,16 @@ def used_bank_ids(user_id: str) -> set[str]:
     return {str((r.get("questions") or {}).get("bank_id")) for r in rows if isinstance(r.get("questions"), dict)}
 
 
-def pick(level: str, fmt: str, user_id: str) -> dict | None:
-    """A bank test of this level the learner has not had yet; same format preferred."""
+def pick(level: str, fmt: str, user_id: str, accent: str | None = None) -> dict | None:
+    """A bank test of this level the learner has not had yet; same format, then same accent preferred."""
     rows = admin_db().table(TABLE).select("*").eq("level", level).execute().data or []
     seen = used_bank_ids(user_id)
     fresh = [r for r in rows if str(r["id"]) not in seen]
     if not fresh:
         return None
-    fresh.sort(key=lambda r: (r.get("format") != fmt, int(r.get("times_used") or 0)))
+    fresh.sort(key=lambda r: (r.get("format") != fmt,
+                              bool(accent) and (r.get("content") or {}).get("accent") != accent,
+                              int(r.get("times_used") or 0)))
     return fresh[0]
 
 

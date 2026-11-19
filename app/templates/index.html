@@ -178,7 +178,7 @@
           <h2 data-i18n="l_title">Listening Practice</h2>
           <p class="text-secondary" data-i18n="l_sub">Listen to a recording made for your level and answer 10 questions. You can play the recording up to 3 times before checking. The transcript opens after checking.</p>
           <div class="row g-2">
-            <div class="col-md-2">
+            <div class="col-6 col-md-1">
               <label class="form-label small text-secondary mb-1" data-i18n="level">Level</label>
               <select id="listeningLevel" class="form-select">
                 <option>A1</option><option>A2</option><option selected>B1</option><option>B2</option><option>C1</option><option>C2</option>
@@ -192,7 +192,14 @@
                 <option value="announcement">Announcement</option>
               </select>
             </div>
-            <div class="col-md-5">
+            <div class="col-6 col-md-3">
+              <label class="form-label small text-secondary mb-1" data-i18n="l_accent">Accent</label>
+              <select id="listeningAccent" class="form-select">
+                <option value="british" data-i18n="l_acc_br">British</option>
+                <option value="american" data-i18n="l_acc_us">American</option>
+              </select>
+            </div>
+            <div class="col-md-3">
               <label class="form-label small text-secondary mb-1" data-i18n="topic">Topic</label>
               <input id="listeningTopic" class="form-control" maxlength="100" placeholder="e.g. booking a hotel room (optional)">
             </div>
