@@ -108,7 +108,10 @@
         </div>
 
         <div id="page-tutor" class="page d-none">
-          <h2 data-i18n="t_title">AI Tutor</h2>
+          <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <h2 class="mb-0" data-i18n="t_title">AI Tutor</h2>
+            <button class="btn btn-sm btn-outline-secondary" onclick="newChat()" data-i18n="t_new">↺ New conversation</button>
+          </div>
           <p class="text-secondary" data-i18n="t_sub">Chat naturally. The tutor uses your current learning profile.</p>
           <div id="chatBox" class="chat-box mb-3"></div>
           <div class="input-group">

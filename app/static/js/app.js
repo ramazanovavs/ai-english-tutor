@@ -295,6 +295,7 @@ function openPage(name) {
   if (name === "listening") suggestListeningLevel();
   if (name !== "listening" && typeof stopListeningAudio === "function") stopListeningAudio();
   if (name === "roadmap") loadRoadmap();
+  if (name === "tutor") loadChatHistory();
   if (name === "review") loadReview();
   if (name === "feedback") loadFeedback();
   else feedbackFromPage = name;
@@ -4314,4 +4315,37 @@ function openFeedbackShot(img) {
   if (!img.src || img.src.startsWith("data:")) return;
   const w = window.open();
   if (w) { w.opener = null; w.document.title = img.alt; const big = w.document.createElement("img"); big.src = img.src; big.style.maxWidth = "100%"; w.document.body.appendChild(big); }
+}
+
+// ========================= AI Tutor: conversation memory =========================
+Object.assign(RM_T, {
+  t_new: {ru: "↺ Новый диалог", kk: "↺ Жаңа диалог", en: "↺ New conversation"},
+  t_sub: {ru: "Общайтесь по-английски свободно — репетитор помнит ваш разговор (последние 12 сообщений), учитывает уровень и объясняет на выбранном языке. «Новый диалог» начинает разговор заново.", kk: "Ағылшынша еркін сөйлесіңіз — репетитор әңгімеңізді (соңғы 12 хабарлама) есте сақтайды, деңгейіңізді ескеріп, таңдалған тілде түсіндіреді. «Жаңа диалог» әңгімені қайта бастайды.", en: "Chat naturally. The tutor remembers your conversation (last 12 messages), uses your level and explains in your language. “New conversation” starts again."},
+  t_started: {ru: "Новый диалог начат. О чём поговорим?", kk: "Жаңа диалог басталды. Не туралы сөйлесеміз?", en: "New conversation started. What shall we talk about?"},
+});
+let chatHistoryLoaded = false;
+
+async function loadChatHistory() {
+  if (chatHistoryLoaded) return;
+  const box = document.getElementById("chatBox");
+  if (!box || box.children.length) { chatHistoryLoaded = true; return; }
+  try {
+    const d = await api("/api/chat/history");
+    chatHistoryLoaded = true;
+    if (box.children.length) return;                 // the learner already started typing
+    box.innerHTML = (d.messages || []).map(m => m.role === "user"
+      ? `<div class="msg user">${esc(m.content)}</div>`
+      : `<div class="msg ai"><div class="streamed-answer">${esc(m.content)}</div></div>`).join("");
+    box.scrollTop = box.scrollHeight;
+  } catch (e) { /* the chat still works without the history */ }
+}
+
+async function newChat() {
+  try {
+    await api("/api/chat/new", {method: "POST", body: "{}"});
+    const box = document.getElementById("chatBox");
+    box.innerHTML = `<div class="msg ai text-secondary">${esc(T("t_started"))}</div>`;
+    chatHistoryLoaded = true;
+    document.getElementById("chatInput").focus();
+  } catch (e) { rmToast(e.message); }
 }

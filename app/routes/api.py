@@ -15,7 +15,7 @@ from app.services.student_model import (
     get_student_context,
     record_activity,
 )
-from app.agents.tutor_agent import chat as tutor_chat, chat_stream as tutor_chat_stream
+from app.agents.tutor_agent import chat as tutor_chat, chat_stream as tutor_chat_stream, load_history, RESET_MARK
 from app.agents.grammar_agent import analyze as grammar_analyze
 from app.agents.writing_agent import analyze as writing_analyze
 from app.agents.vocabulary_agent import create_set, create_practice
@@ -142,14 +142,48 @@ def me(user=Depends(require_user)):
 def chat(payload: ChatPayload, user=Depends(require_user)):
     """Non-streaming fallback endpoint."""
     ensure_profile(user["id"], user.get("email"))
-    answer = tutor_chat(user["id"], payload.text)
+    answer = tutor_chat(user["id"], payload.text, load_history(user["id"]))
 
     db = admin_db()
     db.table("messages").insert([
-        {"user_id": user["id"], "role": "user", "content": payload.text},
-        {"user_id": user["id"], "role": "assistant", "content": answer},
+        {"user_id": user["id"], "role": "user", "content": payload.text, "created_at": _msg_ts()},
+        {"user_id": user["id"], "role": "assistant", "content": answer, "created_at": _msg_ts()},
     ]).execute()
     return {"answer": answer}
+
+
+_last_msg_ts = [datetime(2000, 1, 1, tzinfo=timezone.utc)]
+
+
+def _msg_ts() -> str:
+    """Strictly increasing timestamp, so a question and its answer saved together keep their order."""
+    now = datetime.now(timezone.utc)
+    if now <= _last_msg_ts[0]:
+        now = _last_msg_ts[0] + timedelta(microseconds=1)
+    _last_msg_ts[0] = now
+    return now.isoformat(timespec="microseconds")
+
+
+@router.get("/chat/history")
+def chat_history(user=Depends(require_user)):
+    """The current conversation, to show it again after the page is reloaded."""
+    rows = (admin_db().table("messages").select("role,content,created_at").eq("user_id", user["id"])
+            .order("created_at", desc=True).limit(60).execute().data or [])
+    out = []
+    for r in rows:
+        if r.get("role") == "system":
+            break
+        if r.get("role") in ("user", "assistant"):
+            out.append({"role": r["role"], "content": r.get("content") or ""})
+    return {"messages": list(reversed(out[:40]))}
+
+
+@router.post("/chat/new")
+def chat_new(user=Depends(require_user)):
+    """Start a new conversation: earlier messages stay in the database but are no longer remembered."""
+    admin_db().table("messages").insert({"user_id": user["id"], "role": "system", "content": RESET_MARK,
+                                       "created_at": _msg_ts()}).execute()
+    return {"ok": True}
 
 
 @router.post("/chat/stream")
@@ -158,18 +192,20 @@ def chat_stream(payload: ChatPayload, user=Depends(require_user)):
     ensure_profile(user["id"], user.get("email"))
     user_id = user["id"]
     user_text = payload.text
+    history = load_history(user_id)   # read before the new message is saved
 
     # Save the learner message before generation starts.
     admin_db().table("messages").insert({
         "user_id": user_id,
         "role": "user",
         "content": user_text,
+        "created_at": _msg_ts(),
     }).execute()
 
     def event_stream():
         chunks: list[str] = []
         try:
-            for delta in tutor_chat_stream(user_id, user_text):
+            for delta in tutor_chat_stream(user_id, user_text, history):
                 chunks.append(delta)
                 payload_json = json.dumps(
                     {"type": "delta", "text": delta},
@@ -183,6 +219,7 @@ def chat_stream(payload: ChatPayload, user=Depends(require_user)):
                     "user_id": user_id,
                     "role": "assistant",
                     "content": answer,
+                    "created_at": _msg_ts(),
                 }).execute()
 
             yield 'data: {"type":"done"}\n\n'
