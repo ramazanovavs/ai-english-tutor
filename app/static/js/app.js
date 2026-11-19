@@ -679,9 +679,9 @@ async function checkWriting() {
     document.getElementById("writingResult").innerHTML = `
       <h4>${esc(d.score)}% · ${esc(T("approx"))} ${esc(d.estimated_level)}</h4>
       <h6>${esc(T("strengths"))}</h6><ul>${(d.strengths || []).map(x=>`<li>${esc(x)}</li>`).join("")}</ul>
-      <h6>${esc(T("improve"))}</h6>${(d.improvements || []).map(x=>`<div class="mb-2"><strong>${esc(x.category)}:</strong> ${esc(x.issue)}<br><span class="text-secondary">${esc(x.suggestion)}</span></div>`).join("")}
+      <h6>${esc(T("improve"))}</h6>${(d.improvements || []).map(x=>`<div class="mb-2"><strong>${esc(x.category)}:</strong> ${esc(x.issue)}${x.quote ? ` <span class="small text-secondary">«${esc(x.quote)}»</span>` : ""}<br><span class="text-secondary">${esc(x.suggestion)}</span></div>`).join("")}
       ${(d.errors || []).length ? `<h6 class="mt-3">${esc(T("errors"))}</h6>${d.errors.map(x => `<div class="mb-1"><code>${esc(x.original)}</code> → <strong>${esc(x.correction)}</strong> <span class="small text-secondary">${esc(x.rule || "")}${x.explanation ? " — " + esc(x.explanation) : ""}</span></div>`).join("")}<div class="small text-secondary">🔁 ${esc(T("saved_to_mistakes"))}</div>` : ""}
-      <h6 class="mt-3">${esc(T("w_revised"))}</h6><div class="alert alert-light">${esc(d.revised_sample)}</div>
+      ${writingRevisedHTML(text, d)}
       <strong>${esc(T("next_task"))}:</strong> ${esc(d.next_task)}`;
     await loadProfile();
   } catch(e) { document.getElementById("writingResult").textContent = e.message; }
@@ -4413,4 +4413,53 @@ function seekListeningTo(ev) {
   const frac = Math.min(Math.max((ev.clientX - r.left) / r.width, 0), 1);
   a.currentTime = Math.min(frac * a.duration, a.duration - 0.1);
   updateListeningTime();
+}
+
+// ---------- Writing: the revised version with highlighted changes ----------
+Object.assign(RM_T, {
+  w_revised: {ru: "Улучшенный вариант", kk: "Жақсартылған нұсқа", en: "Improved version"},
+  w_tab_diff: {ru: "С правками", kk: "Түзетулермен", en: "With changes"},
+  w_tab_clean: {ru: "Чистовик", kk: "Таза нұсқа", en: "Clean copy"},
+  w_removed: {ru: "убрано", kk: "алынды", en: "removed"},
+  w_added: {ru: "добавлено", kk: "қосылды", en: "added"},
+  w_legend: {ru: "ваши идеи сохранены, улучшен язык; учтены все советы выше.", kk: "ойларыңыз сақталды, тіл жақсартылды; жоғарыдағы барлық кеңес ескерілді.", en: "your ideas are kept, the language is improved; all the advice above is applied."},
+  w_changes: {ru: "Главные правки", kk: "Негізгі түзетулер", en: "Key changes"},
+  w_copy: {ru: "Скопировать", kk: "Көшіру", en: "Copy"},
+  w_copied: {ru: "Скопировано", kk: "Көшірілді", en: "Copied"},
+});
+let lastWritingRevised = "";
+
+function writingRevisedHTML(original, d) {
+  const revised = String(d.revised_sample || "").trim();
+  lastWritingRevised = revised;
+  if (!revised) return "";
+  const changes = (d.changes || []).filter(c => c && c.original && c.improved);
+  return `
+    <h6 class="mt-3">${esc(T("w_revised"))}</h6>
+    <ul class="nav nav-tabs small" role="tablist">
+      <li class="nav-item"><button class="nav-link active" type="button" onclick="writingTab('Diff', this)">${esc(T("w_tab_diff"))}</button></li>
+      <li class="nav-item"><button class="nav-link" type="button" onclick="writingTab('Clean', this)">${esc(T("w_tab_clean"))}</button></li>
+    </ul>
+    <div class="border border-top-0 rounded-bottom p-3 mb-3">
+      <div class="writing-pane" id="writingDiff">
+        <div class="small text-secondary mb-2"><del class="diff-del">${esc(T("w_removed"))}</del> <ins class="diff-ins">${esc(T("w_added"))}</ins> — ${esc(T("w_legend"))}</div>
+        <div class="learn-text">${wordDiffHTML(original, revised)}</div>
+      </div>
+      <div class="writing-pane d-none" id="writingClean">
+        <div class="learn-text" style="white-space:pre-wrap">${esc(revised)}</div>
+        <button class="btn btn-sm btn-outline-secondary mt-2" type="button" onclick="copyWritingRevised(this)">📋 ${esc(T("w_copy"))}</button>
+      </div>
+      ${changes.length ? `<h6 class="mt-3">${esc(T("w_changes"))}</h6>${changes.map(c => `<div class="small mb-2"><code>${esc(c.original)}</code> → <strong>${esc(c.improved)}</strong>${c.why ? `<br><span class="text-secondary">${esc(c.why)}</span>` : ""}</div>`).join("")}` : ""}
+    </div>`;
+}
+
+function writingTab(name, btn) {
+  document.querySelectorAll(".writing-pane").forEach(el => el.classList.add("d-none"));
+  document.getElementById(`writing${name}`)?.classList.remove("d-none");
+  btn.closest(".nav").querySelectorAll(".nav-link").forEach(b => b.classList.toggle("active", b === btn));
+}
+
+async function copyWritingRevised(btn) {
+  try { await navigator.clipboard.writeText(lastWritingRevised); btn.textContent = "✓ " + T("w_copied"); }
+  catch (e) { /* clipboard blocked: the text can still be selected by hand */ }
 }
